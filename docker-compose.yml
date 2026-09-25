@@ -24,6 +24,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: ${WHATSAPP_BRIDGE_PORT:-8080}
+      DATA_DIR: /data
     volumes:
       - whatsapp_data:/data
     expose:
