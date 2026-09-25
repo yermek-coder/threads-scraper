@@ -1,0 +1,61 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.venv/
+env/
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+wheels/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Go
+services/whatsapp-bridge/bin/
+services/whatsapp-bridge/whatsapp.db*
+*.exe
+*.test
+*.out
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.next/
+frontend/build/
+.npm/
+.yarn/
+*.log
+
+# Databases and persistent local data
+*.sqlite
+*.sqlite3
+*.db
+postgres_data/
+caddy_data/
+caddy_config/
+
+# OS and IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
