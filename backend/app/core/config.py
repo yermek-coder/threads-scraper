@@ -30,6 +30,7 @@ class AppConfig(BaseSettings):
 
     meta_app_id: str = ""
     meta_app_secret: SecretStr = Field(default=SecretStr(""))
+    threads_app_id: str = ""
     threads_app_secret: SecretStr = Field(default=SecretStr(""))
     threads_access_token: SecretStr = Field(default=SecretStr(""))
     threads_user_id: str = ""

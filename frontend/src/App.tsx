@@ -19,7 +19,7 @@ const navItems: { id: Page; label: string; icon: typeof MessageSquareText; secti
 ];
 
 function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
-  const [page, setPage] = useState<Page>('feed');
+  const [page, setPage] = useState<Page>(() => new URLSearchParams(window.location.search).has('threads_oauth') ? 'threads' : 'feed');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const notify = useCallback((next: Notice) => setNotice(next), []);
@@ -29,6 +29,21 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
     const timeout = window.setTimeout(() => setNotice(null), 6500);
     return () => window.clearTimeout(timeout);
   }, [notice]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const oauthResult = url.searchParams.get('threads_oauth');
+    if (!oauthResult) return;
+    if (oauthResult === 'connected') {
+      setNotice({ kind: 'success', message: 'Threads аккаунт подключён. Access Token и User ID сохранены.' });
+    } else if (oauthResult === 'cancelled') {
+      setNotice({ kind: 'error', message: 'Подключение Threads отменено в Meta.' });
+    } else {
+      setNotice({ kind: 'error', message: 'Не удалось подключить Threads. Проверьте callback URL и настройки Threads App.' });
+    }
+    url.searchParams.delete('threads_oauth');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  }, []);
 
   const currentLabel = navItems.find((item) => item.id === page)?.label ?? 'Обзор';
   const sections = [...new Set(navItems.map((item) => item.section))];
@@ -101,7 +116,12 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
           </Suspense>
           <footer className="mt-9 flex flex-wrap items-center justify-between gap-3 border-t border-[#e5e9ea] pt-4 text-[10px] text-[#a1aaad]">
             <span>Example Organization · Threads Brand Monitoring</span>
-            <span className="inline-flex items-center gap-1.5"><CircleHelp className="h-3 w-3" />Если что-то не работает, проверьте настройки интеграции.</span>
+            <span className="inline-flex flex-wrap items-center gap-x-4 gap-y-2">
+              <a href="/privacy-policy/" className="hover:text-ink">Конфиденциальность</a>
+              <a href="/terms-of-service/" className="hover:text-ink">Условия</a>
+              <a href="/data-deletion/" className="hover:text-ink">Удаление данных</a>
+              <span className="inline-flex items-center gap-1.5"><CircleHelp className="h-3 w-3" />Проверьте настройки интеграции, если что-то не работает.</span>
+            </span>
           </footer>
         </main>
       </div>

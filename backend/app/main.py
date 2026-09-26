@@ -8,16 +8,37 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
-from app.api import auth, keywords, posts, settings, stopwords, whatsapp, webhooks
+from app.api import auth, keywords, posts, settings, stopwords, threads_oauth, whatsapp, webhooks
 from app.api import notifications
 from app.core.config import config
 from app.core.database import Base, SessionFactory, engine
 from app.core.security import hash_password
 from app.models import User
 from app.services.scheduler import start_scheduler, stop_scheduler
+from app.services.threads_web_client import close_threads_web_browser
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+class OAuthCallbackAccessLogFilter(logging.Filter):
+    """Hide one-time OAuth codes and state values from Uvicorn access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "uvicorn.access" and isinstance(record.args, tuple) and len(record.args) >= 3:
+            args = list(record.args)
+            request_path = args[2]
+            if isinstance(request_path, str) and request_path.startswith("/api/threads/oauth/callback?"):
+                args[2] = "/api/threads/oauth/callback?[redacted]"
+                record.args = tuple(args)
+        return True
+
+
+# HTTPX logs complete request URLs at INFO, which would expose token-exchange
+# parameters such as client_secret and access_token. Keep those logs suppressed.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").addFilter(OAuthCallbackAccessLogFilter())
 
 
 async def _initialize_database() -> None:
@@ -51,6 +72,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         stop_scheduler()
+        await close_threads_web_browser()
         await engine.dispose()
 
 
@@ -79,6 +101,7 @@ app.include_router(settings.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(whatsapp.router, prefix="/api")
 app.include_router(webhooks.router, prefix="/api")
+app.include_router(threads_oauth.router, prefix="/api")
 
 
 @app.get("/health", tags=["health"])

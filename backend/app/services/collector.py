@@ -12,7 +12,10 @@ from app.core.database import SessionFactory
 from app.models import Keyword, Post
 from app.services.filter_service import apply_post_filters, load_filter_context
 from app.services.notifier import send_posts
+from app.services.settings_service import get_setting
 from app.services.threads_client import search_keyword
+from app.services.threads_errors import ThreadsCollectionError
+from app.services.threads_web_client import search_keyword_web
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +71,13 @@ async def collect_keyword(
     notification_batch: list[int] | None = None,
 ) -> dict[str, int]:
     """Fetch, filter, de-duplicate, and persist one keyword's latest results."""
-    records = await search_keyword(db, keyword.phrase)
+    method = await get_setting(db, "threads_collection_method") or "web"
+    if method == "api":
+        records = await search_keyword(db, keyword.phrase)
+    elif method == "web":
+        records = await search_keyword_web(db, keyword.phrase)
+    else:
+        raise ThreadsCollectionError("Unknown Threads collection method")
     saved_posts: list[Post] = []
     filter_context = await load_filter_context(db) if records else None
     for item in records:
@@ -111,6 +120,13 @@ async def collect_keyword_id(keyword_id: int, notify: bool = True) -> dict[str, 
 async def poll_active_keywords() -> None:
     """Scheduled job that polls each currently active keyword independently."""
     async with SessionFactory() as db:
+        collection_method = await get_setting(db, "threads_collection_method") or "web"
+        if collection_method == "api" and not await get_setting(db, "threads_access_token"):
+            logger.info("Scheduled Threads collection skipped: access token is not configured")
+            return
+        if collection_method == "web" and not isinstance(await get_setting(db, "threads_web_storage_state"), dict):
+            logger.info("Scheduled Threads collection skipped: web session is not configured")
+            return
         keyword_ids = list((await db.scalars(select(Keyword.id).where(Keyword.is_active.is_(True)))).all())
         notification_batch: list[int] = []
         for keyword_id in keyword_ids:

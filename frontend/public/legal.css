@@ -1,0 +1,39 @@
+:root {
+  color: #172126;
+  background: #f8f9f9;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: #577738; }
+a:hover { color: #172126; }
+.site-header { background: #fff; border-bottom: 1px solid #e5e9ea; }
+.header-inner { align-items: center; display: flex; flex-wrap: wrap; gap: 18px; justify-content: space-between; margin: 0 auto; max-width: 960px; padding: 20px 24px; }
+.brand { align-items: center; color: #172126; display: inline-flex; font-size: 14px; font-weight: 750; gap: 11px; letter-spacing: .04em; text-decoration: none; }
+.brand-mark { align-items: center; background: #172126; border-radius: 12px; color: #c5f36a; display: inline-flex; font-size: 17px; height: 38px; justify-content: center; width: 38px; }
+.brand-muted { color: #879398; font-weight: 500; }
+.legal-nav { display: flex; flex-wrap: wrap; gap: 10px 20px; }
+.legal-nav a { color: #66747a; font-size: 12px; text-decoration: none; }
+.legal-nav a[aria-current="page"] { color: #172126; font-weight: 700; }
+.container { margin: 0 auto; max-width: 816px; padding: 52px 24px 40px; }
+.eyebrow { color: #829096; font-size: 11px; font-weight: 750; letter-spacing: .16em; text-transform: uppercase; }
+h1 { font-size: clamp(30px, 6vw, 40px); letter-spacing: -.045em; line-height: 1.15; margin: 14px 0 0; }
+.lead { color: #647278; font-size: 15px; line-height: 1.7; margin: 16px 0 0; }
+.updated { color: #879398; font-size: 12px; margin: 12px 0 0; }
+.document { background: #fff; border: 1px solid #e5e9ea; border-radius: 18px; box-shadow: 0 2px 8px #1721260a; margin-top: 30px; padding: 28px 32px; }
+.document section + section { border-top: 1px solid #edf0f1; margin-top: 24px; padding-top: 22px; }
+h2 { font-size: 18px; letter-spacing: -.02em; line-height: 1.4; margin: 0; }
+p, li { color: #4e5d63; font-size: 14px; line-height: 1.75; }
+.document p { margin: 9px 0 0; }
+.document ul { margin: 9px 0 0; padding-left: 22px; }
+.document li + li { margin-top: 4px; }
+.page-footer { align-items: center; color: #879398; display: flex; flex-wrap: wrap; font-size: 12px; gap: 12px 20px; justify-content: space-between; margin-top: 24px; }
+.page-footer a { text-decoration: none; }
+@media (max-width: 600px) {
+  .header-inner { align-items: flex-start; flex-direction: column; padding: 16px 18px; }
+  .container { padding: 36px 18px 28px; }
+  .document { padding: 22px 18px; }
+}

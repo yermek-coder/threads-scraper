@@ -36,7 +36,10 @@ export type PostPage = {
 };
 
 export type Settings = {
+  threads_app_id_configured: boolean;
   threads_access_token_configured: boolean;
+  threads_collection_method: 'web' | 'api';
+  threads_web_session_configured: boolean;
   threads_user_id: string;
   threads_verify_token: string;
   smtp_host: string;

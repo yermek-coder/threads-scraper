@@ -43,8 +43,12 @@ async def read_settings(db: AsyncSession) -> SettingsRead:
     """Build a dashboard-safe view of editable integration settings."""
     token = await get_setting(db, "threads_access_token")
     smtp_pass = await get_setting(db, "smtp_pass")
+    web_session = await get_setting(db, "threads_web_storage_state")
     return SettingsRead(
+        threads_app_id_configured=bool(config.threads_app_id.strip()),
         threads_access_token_configured=bool(token),
+        threads_collection_method=await get_setting(db, "threads_collection_method") or "web",
+        threads_web_session_configured=isinstance(web_session, dict),
         threads_user_id=await get_setting(db, "threads_user_id"),
         threads_verify_token=config.threads_verify_token.get_secret_value(),
         smtp_host=await get_setting(db, "smtp_host"),

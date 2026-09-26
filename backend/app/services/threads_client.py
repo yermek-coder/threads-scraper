@@ -1,4 +1,4 @@
-"""Async client for Threads keyword search and long-lived token refresh."""
+"""Async client for Threads Graph API search and long-lived token refresh."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -9,11 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import config
 from app.services.settings_service import get_setting, save_setting
+from app.services.threads_errors import ThreadsCollectionError
 
 _quota_lock = asyncio.Lock()
 
 
-class ThreadsAPIError(RuntimeError):
+class ThreadsAPIError(ThreadsCollectionError):
     """Raised when Threads rejects a request or its response is invalid."""
 
 

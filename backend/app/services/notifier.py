@@ -28,6 +28,7 @@ class SMTPConfig:
     password: str
     sender: str
     start_tls: bool
+    use_tls: bool
 
 
 def _post_line(post: Post) -> str:
@@ -72,13 +73,18 @@ async def _send_whatsapp(recipient: str, message: str) -> None:
 
 async def _load_smtp_config(db: AsyncSession) -> SMTPConfig:
     """Load SMTP settings once using the caller's database session."""
+    port = int(await get_setting(db, "smtp_port"))
+    tls_enabled = bool(await get_setting(db, "smtp_use_tls"))
     return SMTPConfig(
         host=await get_setting(db, "smtp_host"),
-        port=int(await get_setting(db, "smtp_port")),
+        port=port,
         username=await get_setting(db, "smtp_user"),
         password=await get_setting(db, "smtp_pass"),
         sender=await get_setting(db, "smtp_from"),
-        start_tls=bool(await get_setting(db, "smtp_use_tls")),
+        # Port 465 expects TLS from the start of the connection; port 587 uses
+        # STARTTLS after the initial SMTP handshake.
+        start_tls=tls_enabled and port != 465,
+        use_tls=tls_enabled and port == 465,
     )
 
 
@@ -89,7 +95,7 @@ async def _send_email(
     html_body: str,
     smtp: SMTPConfig,
 ) -> None:
-    """Send a multipart email through SMTP using STARTTLS when enabled."""
+    """Send a multipart email through SMTP with the port-appropriate TLS mode."""
     if not smtp.host or not smtp.sender:
         raise RuntimeError("SMTP host and sender address must be configured")
     message = EmailMessage()
@@ -105,6 +111,7 @@ async def _send_email(
         username=smtp.username or None,
         password=smtp.password or None,
         start_tls=smtp.start_tls,
+        use_tls=smtp.use_tls,
         timeout=30,
     )
 

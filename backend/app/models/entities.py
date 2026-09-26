@@ -101,3 +101,14 @@ class NotificationLog(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     post_id: Mapped[int | None] = mapped_column(ForeignKey("posts.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MetaDeletionRequest(Base):
+    """Public status record returned to Meta for a user-data deletion request."""
+
+    __tablename__ = "meta_deletion_requests"
+
+    confirmation_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="completed")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -13,7 +13,7 @@ from app.core.security import get_current_user
 from app.models import Keyword, Post
 from app.services.collector import collect_keyword
 from app.services.notifier import send_posts
-from app.services.threads_client import ThreadsAPIError
+from app.services.threads_errors import ThreadsCollectionError
 
 router = APIRouter(prefix="/keywords", tags=["keywords"], dependencies=[Depends(get_current_user)])
 DbDep = Annotated[AsyncSession, Depends(get_db)]
@@ -74,7 +74,7 @@ async def collect_one_keyword(keyword_id: int, db: DbDep) -> CollectResponse:
         raise HTTPException(status_code=404, detail="Keyword not found")
     try:
         result = await collect_keyword(db, keyword)
-    except ThreadsAPIError as exc:
+    except ThreadsCollectionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return CollectResponse(keyword_id=keyword_id, **result)
 
@@ -91,7 +91,7 @@ async def collect_active_keywords(db: DbDep) -> list[CollectResponse]:
             if keyword is None or not keyword.is_active:
                 continue
             result = await collect_keyword(db, keyword, notify=False, notification_batch=notification_batch)
-        except ThreadsAPIError as exc:
+        except ThreadsCollectionError as exc:
             await db.rollback()
             results.append(CollectResponse(keyword_id=keyword_id, error=str(exc)))
             continue

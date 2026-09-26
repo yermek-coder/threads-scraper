@@ -1,6 +1,7 @@
 """Pydantic request and response models."""
 
 from datetime import datetime
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -115,6 +116,7 @@ class PostStatusUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
     threads_access_token: str | None = Field(default=None, max_length=4096)
     threads_user_id: str | None = Field(default=None, max_length=255)
+    threads_collection_method: Literal["web", "api"] | None = None
     smtp_host: str | None = Field(default=None, max_length=255)
     smtp_port: int | None = Field(default=None, ge=1, le=65535)
     smtp_user: str | None = Field(default=None, max_length=320)
@@ -133,7 +135,10 @@ class SettingsUpdate(BaseModel):
 
 
 class SettingsRead(BaseModel):
+    threads_app_id_configured: bool
     threads_access_token_configured: bool
+    threads_collection_method: Literal["web", "api"]
+    threads_web_session_configured: bool
     threads_user_id: str
     threads_verify_token: str
     smtp_host: str
@@ -144,6 +149,62 @@ class SettingsRead(BaseModel):
     smtp_use_tls: bool
     whatsapp_recipients: list[str]
     email_recipients: list[str]
+
+
+class ThreadsWebSessionImport(BaseModel):
+    storage_state: dict[str, Any] | list[dict[str, Any]]
+
+    @field_validator("storage_state")
+    @classmethod
+    def validate_storage_state(cls, value: dict[str, Any] | list[dict[str, Any]]) -> dict[str, Any]:
+        if isinstance(value, list):
+            value = {"cookies": value, "origins": []}
+        elif "origins" not in value:
+            value = {**value, "origins": []}
+        cookies = value.get("cookies")
+        origins = value.get("origins")
+        if not isinstance(cookies, list) or not isinstance(origins, list):
+            raise ValueError("Expected a Playwright storage state with cookies and origins")
+        accepted_domains = ("threads.com", "threads.net", "instagram.com")
+        has_session_cookie = any(
+            isinstance(cookie, dict)
+            and cookie.get("name") == "sessionid"
+            and isinstance(cookie.get("domain"), str)
+            and any(
+                cookie["domain"].lower().lstrip(".") == domain
+                or cookie["domain"].lower().lstrip(".").endswith(f".{domain}")
+                for domain in accepted_domains
+            )
+            for cookie in cookies
+        )
+        if not has_session_cookie:
+            raise ValueError("Storage state must include the signed-in Threads or Instagram sessionid cookie")
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            same_site = cookie.get("sameSite")
+            if isinstance(same_site, str):
+                normalized_same_site = {
+                    "no_restriction": "None",
+                    "none": "None",
+                    "lax": "Lax",
+                    "strict": "Strict",
+                }.get(same_site.lower())
+                if normalized_same_site:
+                    cookie["sameSite"] = normalized_same_site
+                else:
+                    cookie.pop("sameSite", None)
+            if "expires" not in cookie and isinstance(cookie.get("expirationDate"), (float, int)):
+                cookie["expires"] = int(cookie.pop("expirationDate"))
+            for unsupported_key in ("hostOnly", "session", "storeId", "expirationDate"):
+                cookie.pop(unsupported_key, None)
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            raise ValueError("Storage state must contain valid JSON data") from None
+        if len(encoded.encode("utf-8")) > 1_000_000:
+            raise ValueError("Storage state must be no larger than 1 MB")
+        return value
 
 
 class TestNotificationRequest(BaseModel):

@@ -74,6 +74,11 @@ export default function LoginPage({ onLogin }: Props) {
             <Button type="submit" className="mt-1 h-12 w-full" disabled={submitting}>{submitting ? <Spinner small label="Входим…" /> : <>Войти в панель <ArrowRight className="h-4 w-4" /></>}</Button>
           </form>
           <p className="mt-7 text-center text-xs leading-5 text-[#9aa4a8]">Учетная запись задаётся на сервере<br />через переменные ADMIN_USERNAME и ADMIN_PASSWORD.</p>
+          <nav aria-label="Юридическая информация" className="mt-7 flex flex-wrap justify-center gap-x-4 gap-y-2 text-[11px] text-[#7d898e]">
+            <a href="/privacy-policy/" className="hover:text-ink">Конфиденциальность</a>
+            <a href="/terms-of-service/" className="hover:text-ink">Условия использования</a>
+            <a href="/data-deletion/" className="hover:text-ink">Удаление данных</a>
+          </nav>
         </div>
       </section>
     </main>

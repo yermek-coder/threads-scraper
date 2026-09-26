@@ -233,9 +233,10 @@ export default function NotificationsPage({ notify }: Props) {
               <Input label="Логин" value={smtpUser} onChange={(event) => setSmtpUser(event.target.value)} autoComplete="username" />
               <Input label="Пароль" value={smtpPass} onChange={(event) => setSmtpPass(event.target.value)} type="password" placeholder={settings?.smtp_pass_configured ? 'Пароль сохранён · пустое поле оставит его без изменений' : 'Введите пароль приложения'} autoComplete="new-password" />
               <Input label="Адрес отправителя" type="email" value={smtpFrom} onChange={(event) => setSmtpFrom(event.target.value)} placeholder="alerts@example.com" />
-              <Textarea label="Получатели" value={emailRecipients} onChange={(event) => setEmailRecipients(event.target.value)} placeholder={'team@example.com\nowner@example.com'} className="min-h-[76px]" />
+              <Textarea label="Получатели Email" value={emailRecipients} onChange={(event) => setEmailRecipients(event.target.value)} placeholder={'team@example.com\nowner@example.com'} className="min-h-[76px]" />
             </div>
-            <label className="mt-4 inline-flex cursor-pointer items-center gap-2.5 text-sm text-[#526168]"><input type="checkbox" className="h-4 w-4 accent-[#79a93c]" checked={smtpUseTls} onChange={(event) => setSmtpUseTls(event.target.checked)} /><ShieldCheck className="h-4 w-4 text-[#7a8c65]" />Использовать STARTTLS</label>
+            <p className="mt-2 text-xs leading-5 text-muted">Укажите по одному адресу в строке или разделите адреса запятыми.</p>
+            <label className="mt-4 inline-flex cursor-pointer items-center gap-2.5 text-sm text-[#526168]"><input type="checkbox" className="h-4 w-4 accent-[#79a93c]" checked={smtpUseTls} onChange={(event) => setSmtpUseTls(event.target.checked)} /><ShieldCheck className="h-4 w-4 text-[#7a8c65]" />Использовать TLS (SSL для порта 465, STARTTLS для 587)</label>
             <div className="mt-5 flex flex-wrap gap-2 border-t border-[#edf0f1] pt-4">
               <Button type="submit" disabled={savingEmail}>{savingEmail && <Spinner small label="" />}Сохранить настройки</Button>
               <Button variant="secondary" onClick={() => void testChannel('email')} disabled={testing !== null || (settings?.email_recipients.length ?? 0) === 0}><Send className="h-4 w-4" />{testing === 'email' ? 'Отправляем…' : 'Отправить тестовый Email'}</Button>
