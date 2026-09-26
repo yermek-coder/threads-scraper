@@ -13,6 +13,34 @@ from app.services.threads_errors import ThreadsCollectionError
 logger = logging.getLogger(__name__)
 _SESSION_KEY = "threads_web_storage_state"
 _SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default&filter=recent"
+_POST_TEXT_READY_SCRIPT = r"""() => {
+  const anchors = Array.from(document.querySelectorAll('a[href*="/post/"]'));
+  return anchors.some((anchor) => {
+    const url = new URL(anchor.href, location.href);
+    const parts = url.pathname.split('/').filter(Boolean);
+    const postIndex = parts.indexOf('post');
+    if (postIndex < 0 || parts.length > postIndex + 2) return false;
+    const postId = parts[postIndex + 1];
+    const username = (parts.find((part) => part.startsWith('@')) || '').slice(1).toLowerCase();
+    const card = anchor.closest('[data-pressable-container="true"]') || anchor.closest('article,[role="article"]');
+    if (!card) return false;
+    return Array.from(card.querySelectorAll('[dir="auto"]')).some((element) => {
+      if (element.closest('button,[role="button"],time')) return false;
+      const text = (element.innerText || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.toLowerCase() === username || text.toLowerCase() === `@${username}` || text.toLowerCase() === 'translate') return false;
+      if (/^\d{1,2}[./]\d{1,2}[./]\d{2,4}$/.test(text)) return false;
+      const link = element.closest('a[href]');
+      if (!link) return true;
+      const linkUrl = new URL(link.href, location.href);
+      const linkParts = linkUrl.pathname.split('/').filter(Boolean);
+      const linkPostIndex = linkParts.indexOf('post');
+      if (linkPostIndex >= 0 && linkParts[linkPostIndex + 1] === postId) return false;
+      if (linkUrl.pathname.startsWith('/@') && !linkUrl.pathname.includes('/post/')) return false;
+      if (linkUrl.pathname === '/search' && linkUrl.searchParams.has('location_id')) return false;
+      return true;
+    });
+  });
+}"""
 _browser_lock = asyncio.Lock()
 _playwright_instance: Any = None
 _browser_instance: Any = None
@@ -86,6 +114,13 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
             if "/challenge" in page.url or "/checkpoint" in page.url:
                 raise ThreadsCollectionError("Threads requested an account verification step. Refresh the browser session.")
 
+            # Threads inserts permalink/date anchors before the caption. Wait for actual
+            # caption text in a rendered post card, not merely for the first anchor.
+            try:
+                await page.wait_for_function(_POST_TEXT_READY_SCRIPT, timeout=12_000)
+            except PlaywrightTimeoutError:
+                logger.debug("Threads search cards did not expose caption text before timeout")
+
             previous_count = 0
             for _ in range(4):
                 current_count = await page.locator('a[href*="/post/"]').count()
@@ -104,50 +139,13 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                     const parts = url.pathname.split('/').filter(Boolean);
                     const postIndex = parts.indexOf('post');
                     const postId = postIndex >= 0 ? parts[postIndex + 1] : '';
-                    if (!postId || found.has(postId)) continue;
+                    if (!postId || parts.length > postIndex + 2 || found.has(postId)) continue;
+                    const username = (parts.find((part) => part.startsWith('@')) || '').slice(1).toLowerCase();
                     const isCurrentPostLink = (link) => {
                       const linkParts = new URL(link.href, location.href).pathname.split('/').filter(Boolean);
                       const linkPostIndex = linkParts.indexOf('post');
                       return linkPostIndex >= 0 && linkParts[linkPostIndex + 1] === postId;
                     };
-
-                    // Threads commonly renders the timestamp link in the post header,
-                    // before the post body in DOM order. Prefer the semantic card so
-                    // that the selected container includes both pieces.
-                    let card = anchor.closest('article,[role="article"]');
-                    if (!card) {
-                      for (let node = anchor.parentElement, depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
-                        const cardText = (node.innerText || '').trim();
-                        if (cardText.length < 20 || cardText.length > 5000) continue;
-                        const hasBodyText = Array.from(node.querySelectorAll('[dir="auto"]')).some((element) => {
-                          // Threads renders engagement counts inside div[role=button],
-                          // not only native button elements. Never treat them as post text.
-                          if (element.closest('button,[role="button"],time')) return false;
-                          const postLink = element.closest('a[href*="/post/"]');
-                          if (postLink && isCurrentPostLink(postLink)) return false;
-                          const text = (element.innerText || '').trim();
-                          if (!text) return false;
-                          const link = element.closest('a[href]');
-                          if (link) {
-                            const path = new URL(link.href, location.href).pathname;
-                            if (path.startsWith('/@') && !path.includes('/post/')) return false;
-                          }
-                          return true;
-                        });
-                        if (hasBodyText) {
-                          card = node;
-                          break;
-                        }
-                      }
-                    }
-                    if (!card) continue;
-
-                    const username = (parts.find((part) => part.startsWith('@')) || '').slice(1).toLowerCase();
-                    const authorLink = Array.from(card.querySelectorAll('a[href]')).find((link) => {
-                      const path = new URL(link.href, location.href).pathname;
-                      return path.startsWith('/@') && !path.includes('/post/');
-                    });
-                    const authorText = (authorLink?.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
                     const monthNames = new Set([
                       'jan', 'january', 'feb', 'february', 'mar', 'march', 'apr', 'april', 'may', 'jun', 'june',
                       'jul', 'july', 'aug', 'august', 'sep', 'sept', 'september', 'oct', 'october', 'nov',
@@ -160,9 +158,9 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                     ]);
                     const isDateOnly = (value) => {
                       if (/^(?:\\d{1,2}[./]\\d{1,2}[./]\\d{2,4}|\\d{4}[-./]\\d{1,2}[-./]\\d{1,2})$/.test(value)) return true;
-                      const parts = value.toLowerCase().replace(/,/g, '').trim().split(/\\s+/).filter(Boolean);
-                      if (['г', 'года'].includes(parts[parts.length - 1]?.replace(/\\.$/, ''))) parts.pop();
-                      const normalized = parts.map((part) => part.replace(/\\.$/, ''));
+                      const dateParts = value.toLowerCase().replace(/,/g, '').trim().split(/\\s+/).filter(Boolean);
+                      if (['г', 'года'].includes(dateParts[dateParts.length - 1]?.replace(/\\.$/, ''))) dateParts.pop();
+                      const normalized = dateParts.map((part) => part.replace(/\\.$/, ''));
                       const isDay = (part) => /^\\d{1,2}$/.test(part);
                       const isYear = (part) => /^\\d{2,4}$/.test(part);
                       const isMonth = (part) => monthNames.has(part);
@@ -176,32 +174,71 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                       }
                       return false;
                     };
-                    const bodyTexts = Array.from(card.querySelectorAll('[dir="auto"]'))
-                      .filter((element) => !element.closest('button,[role="button"],time'))
-                      .filter((element) => !element.querySelector('[dir="auto"]'))
-                      .filter((element) => {
-                        const link = element.closest('a[href]');
-                        if (!link) return true;
-                        const linkUrl = new URL(link.href, location.href);
-                        if (linkUrl.pathname.startsWith('/@') && !linkUrl.pathname.includes('/post/')) return false;
-                        // The post permalink in Threads' header usually contains only its date.
-                        if (isCurrentPostLink(link)) return false;
-                        if (linkUrl.pathname === '/search' && linkUrl.searchParams.has('location_id')) return false;
-                        return true;
-                      })
+                    const isNonContentText = (text) => {
+                      const normalized = text.toLowerCase();
+                      return !text || normalized === username || normalized === `@${username}` || normalized === 'translate'
+                        || isDateOnly(text)
+                        || /^(?:\\d+\\s+views?|\\d+\\s*(?:s|m|h|d|w|y|сек(?:унд[уы]?)?|с|мин(?:ута|уты|ут)?|ч(?:ас(?:а|ов)?)?|д|дн\\.?|д(?:ень|ня|ней)|нед(?:ел(?:я|и|ь))?\\.?|неделя|недели|недель|мес(?:\\.|яц(?:а|ев)?)?|г\\.?|год|года|лет|жыл|күн|сағ|апта)\\.?$)/iu.test(text);
+                    };
+                    const isPostBodyElement = (element) => {
+                      if (element.closest('button,[role="button"],time')) return false;
+                      const text = (element.innerText || '').replace(/\\s+/g, ' ').trim();
+                      if (isNonContentText(text)) return false;
+                      const link = element.closest('a[href]');
+                      if (!link) return true;
+                      const linkUrl = new URL(link.href, location.href);
+                      if (linkUrl.pathname.startsWith('/@') && !linkUrl.pathname.includes('/post/')) return false;
+                      if (isCurrentPostLink(link)) return false;
+                      if (linkUrl.pathname === '/search' && linkUrl.searchParams.has('location_id')) return false;
+                      return true;
+                    };
+                    const hasPostBodyText = (node) => {
+                      if (Array.from(node.querySelectorAll('[dir="auto"]')).some(isPostBodyElement)) return true;
+                      // Some Threads cards omit dir=auto on caption text; inspect visible leaf nodes too.
+                      return Array.from(node.querySelectorAll('p,span,div'))
+                        .filter((element) => element.children.length === 0)
+                        .some(isPostBodyElement);
+                    };
+
+                    // Threads commonly renders the timestamp link in the post header,
+                    // before the post body in DOM order. Prefer the semantic card so
+                    // that the selected container includes both pieces.
+                    let card = anchor.closest('[data-pressable-container="true"]')
+                      || anchor.closest('article,[role="article"]');
+                    if (!card) {
+                      for (let node = anchor.parentElement, depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
+                        const cardText = (node.innerText || '').trim();
+                        if (!cardText || cardText.length > 5000) continue;
+                        if (hasPostBodyText(node)) {
+                          card = node;
+                          break;
+                        }
+                      }
+                    }
+                    if (!card) continue;
+
+                    const authorLink = Array.from(card.querySelectorAll('a[href]')).find((link) => {
+                      const path = new URL(link.href, location.href).pathname;
+                      return path.startsWith('/@') && !path.includes('/post/');
+                    });
+                    const authorText = (authorLink?.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const getBodyTexts = (elements) => Array.from(elements)
+                      .filter(isPostBodyElement)
                       .map((element) => (element.innerText || '')
                         .split('\\n')
                         .map((line) => line.replace(/\\s+/g, ' ').trim())
-                        .filter((line) => line && line.toLowerCase() !== 'translate')
+                        .filter((line) => line && !isNonContentText(line) && line.toLowerCase() !== authorText)
                         .join('\\n')
                         .trim())
-                      .filter((text) => {
-                        const normalized = text.toLowerCase();
-                        if (!text || normalized === username || normalized === `@${username}` || normalized === authorText) return false;
-                        if (isDateOnly(text)) return false;
-                        if (/^(?:\\d+\\s+views?|\\d+\\s*(?:s|m|h|d|w|y|сек(?:унд[уы]?)?|с|мин(?:ута|уты|ут)?|ч(?:ас(?:а|ов)?)?|д|дн\\.?|д(?:ень|ня|ней)|нед(?:ел(?:я|и|ь))?\\.?|неделя|недели|недель|мес(?:\\.|яц(?:а|ев)?)?|г\\.?|год|года|лет|жыл|күн|сағ|апта)\\.?$)/iu.test(text)) return false;
-                        return true;
-                      });
+                      .filter(Boolean);
+                    const dirTextElements = Array.from(card.querySelectorAll('[dir="auto"]'))
+                      .filter((element) => !element.querySelector('[dir="auto"]'));
+                    let bodyTexts = getBodyTexts(dirTextElements);
+                    if (!bodyTexts.length) {
+                      const plainTextElements = Array.from(card.querySelectorAll('p,span,div'))
+                        .filter((element) => element.children.length === 0);
+                      bodyTexts = getBodyTexts(plainTextElements);
+                    }
                     const text = Array.from(new Set(bodyTexts)).join('\\n');
                     const timestamp = card.querySelector('time[datetime]')?.getAttribute('datetime') || null;
                     found.set(postId, {
