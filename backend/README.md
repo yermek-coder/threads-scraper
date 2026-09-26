@@ -30,3 +30,7 @@ python backend/scripts/export_threads_session.py
 The script opens Threads for manual sign-in and writes `~/threads-storage-state.json`. Import that file from **Settings → Threads → Авторизованная web-сессия**. The importer also accepts the cookie-list JSON export used by the older `abu-makhmed` scraper. Treat either file as a login secret. Re-import it after Threads expires the session.
 
 The collection method can be changed in the same settings screen. `Threads web scraping` is the default; `Graph API · threads_keyword_search` remains available as an alternative and requires the Meta API token and permission.
+
+## Jev relevance filter
+
+The final relevance check can use Jev through OpenRouter. Save an OpenRouter API key in **Settings → Threads → Фильтр релевантности Jev** (or set `OPENROUTER_API_KEY` in the backend environment), enable the filter, and edit its instruction there. Jev checks each non-duplicate post against the keyword that found it. If OpenRouter is unavailable, collection keeps the existing deterministic relevance result.

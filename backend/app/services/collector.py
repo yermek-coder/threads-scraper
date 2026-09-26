@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import SessionFactory
 from app.models import Keyword, Post
-from app.services.filter_service import apply_post_filters, load_filter_context
+from app.services.filter_service import apply_post_filters, load_filter_context, remember_post
 from app.services.notifier import send_posts
 from app.services.settings_service import get_setting
 from app.services.threads_client import search_keyword
@@ -87,15 +87,15 @@ async def collect_keyword(
         existing = await db.scalar(select(Post.id).where(Post.threads_post_id == post.threads_post_id))
         if existing is not None:
             continue
+        assert filter_context is not None
+        await apply_post_filters(post, filter_context, keyword.phrase)
         try:
             async with db.begin_nested():
                 db.add(post)
                 await db.flush()
-                assert filter_context is not None
-                await apply_post_filters(post, filter_context)
-                await db.flush()
         except IntegrityError:
             continue
+        remember_post(post, filter_context)
         saved_posts.append(post)
 
     keyword.last_polled_at = datetime.now(timezone.utc)

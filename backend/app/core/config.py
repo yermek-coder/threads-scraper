@@ -40,6 +40,8 @@ class AppConfig(BaseSettings):
     threads_daily_call_limit: int = Field(default=2200, ge=1)
     threads_token_refresh_interval_days: int = Field(default=7, ge=1, le=60)
 
+    openrouter_api_key: SecretStr = Field(default=SecretStr(""))
+
     whatsapp_bridge_url: str = "http://whatsapp-bridge:8080"
     whatsapp_recipients: str = ""
     smtp_host: str = ""

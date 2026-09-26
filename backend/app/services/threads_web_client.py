@@ -119,28 +119,31 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                       return path.startsWith('/@') && !path.includes('/post/');
                     });
                     const authorText = (authorLink?.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                    const bodyText = Array.from(card.querySelectorAll('span[dir="auto"]'))
-                      .filter((element) => !element.closest('button'))
+                    const bodyTexts = Array.from(card.querySelectorAll('span[dir="auto"]'))
+                      .filter((element) => !element.closest('button,time'))
+                      .filter((element) => !element.querySelector('span[dir="auto"]'))
                       .filter((element) => {
                         const link = element.closest('a[href]');
                         if (!link) return true;
-                        const path = new URL(link.href, location.href).pathname;
-                        return !path.startsWith('/@') || path.includes('/post/');
+                        const linkUrl = new URL(link.href, location.href);
+                        if (linkUrl.pathname.startsWith('/@') && !linkUrl.pathname.includes('/post/')) return false;
+                        if (linkUrl.pathname === '/search' && linkUrl.searchParams.has('location_id')) return false;
+                        return true;
                       })
-                      .map((element) => (element.innerText || '').replace(/\\s+/g, ' ').trim())
-                      .filter((text) => text && text.toLowerCase() !== username && text.toLowerCase() !== `@${username}` && text.toLowerCase() !== authorText)
-                      .sort((left, right) => right.length - left.length)[0] || '';
-                    const clone = card.cloneNode(true);
-                    clone.querySelectorAll('button,time,svg,script,style').forEach((element) => element.remove());
-                    clone.querySelectorAll('a[href]').forEach((link) => {
-                      const path = new URL(link.href, location.href).pathname;
-                      if (path.startsWith('/@') && !path.includes('/post/')) link.remove();
-                    });
-                    clone.querySelectorAll('span[dir="auto"]').forEach((element) => {
-                      const content = (element.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                      if (content === username || content === `@${username}` || content === authorText) element.remove();
-                    });
-                    const text = bodyText || clone.innerText.replace(/\\s+/g, ' ').trim();
+                      .map((element) => (element.innerText || '')
+                        .split('\\n')
+                        .map((line) => line.replace(/\\s+/g, ' ').trim())
+                        .filter((line) => line && line.toLowerCase() !== 'translate')
+                        .join('\\n')
+                        .trim())
+                      .filter((text) => {
+                        const normalized = text.toLowerCase();
+                        if (!text || normalized === username || normalized === `@${username}` || normalized === authorText) return false;
+                        if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(text)) return false;
+                        if (/^(?:\\d+\\s+views?|\\d+[smhdwy])$/i.test(text)) return false;
+                        return true;
+                      });
+                    const text = Array.from(new Set(bodyTexts)).join('\\n');
                     const timestamp = card.querySelector('time[datetime]')?.getAttribute('datetime') || null;
                     found.set(postId, {
                       id: postId,

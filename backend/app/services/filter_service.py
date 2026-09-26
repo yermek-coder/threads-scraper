@@ -1,17 +1,24 @@
 """Stop-word filtering and exact/fuzzy duplicate detection."""
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass, field
 
+import httpx
 from rapidfuzz import fuzz
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Post, StopWord
+from app.services.settings_service import DEFAULT_JEV_RELEVANCE_PROMPT, get_setting
 
 FUZZY_DUPLICATE_THRESHOLD = 85
 DUPLICATE_CANDIDATE_LIMIT = 2000
+JEV_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
+JEV_MODEL = "typesafe/jev-1.13"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -20,6 +27,9 @@ class FilterContext:
 
     stop_words: tuple[str, ...]
     duplicate_candidates: list[tuple[int, str]] = field(default_factory=list)
+    openrouter_api_key: str | None = None
+    jev_relevance_enabled: bool = False
+    jev_relevance_prompt: str = DEFAULT_JEV_RELEVANCE_PROMPT
 
 
 async def load_filter_context(db: AsyncSession) -> FilterContext:
@@ -34,7 +44,14 @@ async def load_filter_context(db: AsyncSession) -> FilterContext:
         )
     ).all()
     candidates = [(post_id, text) for post_id, text in rows if text]
-    return FilterContext(stop_words=stop_words, duplicate_candidates=candidates)
+    api_key = await get_setting(db, "openrouter_api_key")
+    return FilterContext(
+        stop_words=stop_words,
+        duplicate_candidates=candidates,
+        openrouter_api_key=api_key if isinstance(api_key, str) and api_key else None,
+        jev_relevance_enabled=bool(await get_setting(db, "jev_relevance_enabled")),
+        jev_relevance_prompt=await get_setting(db, "jev_relevance_prompt") or DEFAULT_JEV_RELEVANCE_PROMPT,
+    )
 
 
 def contains_stop_word(text: str, word_or_phrase: str) -> bool:
@@ -61,16 +78,62 @@ def _find_duplicate_id(normalized_text: str, candidates: list[tuple[int, str]]) 
     return None
 
 
-async def apply_post_filters(post: Post, context: FilterContext) -> Post:
-    """Set relevance and duplicate state using the batch's cached filter context."""
+async def apply_post_filters(post: Post, context: FilterContext, keyword: str = "") -> Post:
+    """Set stop-word, duplicate, and optional Jev relevance state for one post."""
     post.is_relevant = not any(contains_stop_word(post.text, word) for word in context.stop_words)
     normalized = " ".join(post.text.casefold().split())
-    if not normalized:
-        return post
-    duplicate_id = await asyncio.to_thread(_find_duplicate_id, normalized, context.duplicate_candidates)
-    if duplicate_id is not None:
-        post.is_duplicate = True
-        post.duplicate_of_id = duplicate_id
-    else:
-        context.duplicate_candidates.append((post.id, post.text))
+    if normalized:
+        duplicate_id = await asyncio.to_thread(_find_duplicate_id, normalized, context.duplicate_candidates)
+        if duplicate_id is not None:
+            post.is_duplicate = True
+            post.duplicate_of_id = duplicate_id
+    if (
+        post.is_relevant
+        and not post.is_duplicate
+        and context.jev_relevance_enabled
+        and context.openrouter_api_key
+    ):
+        decision = await _jev_relevance_decision(post.text, keyword, context)
+        if decision is not None:
+            post.is_relevant = decision
     return post
+
+
+def remember_post(post: Post, context: FilterContext) -> None:
+    """Add a successfully saved canonical post to the current batch's duplicate candidates."""
+    if not post.is_duplicate and " ".join(post.text.casefold().split()):
+        context.duplicate_candidates.append((post.id, post.text))
+
+
+async def _jev_relevance_decision(post_text: str, keyword: str, context: FilterContext) -> bool | None:
+    """Ask Jev whether a post is relevant; keep deterministic results if the API fails."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            response = await client.post(
+                JEV_DECISIONS_URL,
+                headers={
+                    "Authorization": f"Bearer {context.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": JEV_MODEL,
+                    "state": {"post": post_text, "keyword": keyword},
+                    "questions": {
+                        "relevant": {
+                            "type": "noul",
+                            "instructions": context.jev_relevance_prompt,
+                        }
+                    },
+                },
+            )
+        if not response.is_success:
+            logger.warning("OpenRouter Jev relevance request failed with HTTP %s", response.status_code)
+            return None
+        answer = response.json()["answers"]["relevant"]
+        probability = float(answer["noul"])
+        if answer.get("type") != "noul" or not 0.0 <= probability <= 1.0:
+            raise ValueError("Unexpected Jev relevance response")
+        return probability >= 0.5
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
+        logger.warning("OpenRouter Jev relevance check failed: %s", type(error).__name__)
+        return None

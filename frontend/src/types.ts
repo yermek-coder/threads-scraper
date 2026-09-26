@@ -40,6 +40,9 @@ export type Settings = {
   threads_access_token_configured: boolean;
   threads_collection_method: 'web' | 'api';
   threads_web_session_configured: boolean;
+  openrouter_api_key_configured: boolean;
+  jev_relevance_enabled: boolean;
+  jev_relevance_prompt: string;
   threads_user_id: string;
   threads_verify_token: string;
   smtp_host: string;

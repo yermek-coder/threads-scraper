@@ -9,7 +9,14 @@ from app.api.schemas import SettingsRead, SettingsUpdate
 from app.core.config import config
 from app.models import Setting
 
-SECRET_KEYS = {"threads_access_token", "smtp_pass"}
+SECRET_KEYS = {"threads_access_token", "openrouter_api_key", "smtp_pass"}
+DEFAULT_JEV_RELEVANCE_PROMPT = (
+    "Оцени, относится ли публикация из state.post к ключевой фразе из state.keyword. "
+    "Считай публикацию релевантной, если она содержательно обсуждает ключевую фразу, "
+    "её объект или непосредственный контекст. Считай нерелевантным случайное совпадение "
+    "слова, спам, рекламу без связи с запросом и общие публикации без этой темы. "
+    "Учитывай смысл, а не только буквальное совпадение слов."
+)
 
 
 def _env_value(key: str) -> Any:
@@ -42,6 +49,7 @@ async def save_setting(db: AsyncSession, key: str, value: Any) -> None:
 async def read_settings(db: AsyncSession) -> SettingsRead:
     """Build a dashboard-safe view of editable integration settings."""
     token = await get_setting(db, "threads_access_token")
+    openrouter_key = await get_setting(db, "openrouter_api_key")
     smtp_pass = await get_setting(db, "smtp_pass")
     web_session = await get_setting(db, "threads_web_storage_state")
     return SettingsRead(
@@ -49,6 +57,9 @@ async def read_settings(db: AsyncSession) -> SettingsRead:
         threads_access_token_configured=bool(token),
         threads_collection_method=await get_setting(db, "threads_collection_method") or "web",
         threads_web_session_configured=isinstance(web_session, dict),
+        openrouter_api_key_configured=bool(openrouter_key),
+        jev_relevance_enabled=bool(await get_setting(db, "jev_relevance_enabled")),
+        jev_relevance_prompt=await get_setting(db, "jev_relevance_prompt") or DEFAULT_JEV_RELEVANCE_PROMPT,
         threads_user_id=await get_setting(db, "threads_user_id"),
         threads_verify_token=config.threads_verify_token.get_secret_value(),
         smtp_host=await get_setting(db, "smtp_host"),

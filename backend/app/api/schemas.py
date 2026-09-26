@@ -117,6 +117,9 @@ class SettingsUpdate(BaseModel):
     threads_access_token: str | None = Field(default=None, max_length=4096)
     threads_user_id: str | None = Field(default=None, max_length=255)
     threads_collection_method: Literal["web", "api"] | None = None
+    openrouter_api_key: str | None = Field(default=None, max_length=4096)
+    jev_relevance_enabled: bool | None = None
+    jev_relevance_prompt: str | None = Field(default=None, min_length=1, max_length=4000)
     smtp_host: str | None = Field(default=None, max_length=255)
     smtp_port: int | None = Field(default=None, ge=1, le=65535)
     smtp_user: str | None = Field(default=None, max_length=320)
@@ -133,12 +136,25 @@ class SettingsUpdate(BaseModel):
             return None
         return list(dict.fromkeys(value.strip() for value in values if value.strip()))
 
+    @field_validator("jev_relevance_prompt")
+    @classmethod
+    def clean_jev_relevance_prompt(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Jev relevance prompt cannot be blank")
+        return cleaned
+
 
 class SettingsRead(BaseModel):
     threads_app_id_configured: bool
     threads_access_token_configured: bool
     threads_collection_method: Literal["web", "api"]
     threads_web_session_configured: bool
+    openrouter_api_key_configured: bool
+    jev_relevance_enabled: bool
+    jev_relevance_prompt: str
     threads_user_id: str
     threads_verify_token: str
     smtp_host: str

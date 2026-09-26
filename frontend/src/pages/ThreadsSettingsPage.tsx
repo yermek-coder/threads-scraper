@@ -25,8 +25,12 @@ export default function ThreadsSettingsPage({ notify }: Props) {
   const [saving, setSaving] = useState(false);
   const [accessToken, setAccessToken] = useState('');
   const [userId, setUserId] = useState('');
+  const [openRouterKey, setOpenRouterKey] = useState('');
+  const [jevPrompt, setJevPrompt] = useState('');
+  const [jevEnabled, setJevEnabled] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [methodSaving, setMethodSaving] = useState(false);
+  const [jevSaving, setJevSaving] = useState(false);
   const [sessionSaving, setSessionSaving] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -36,6 +40,8 @@ export default function ThreadsSettingsPage({ notify }: Props) {
       if (!alive) return;
       setSettings(result);
       setUserId(result.threads_user_id);
+      setJevPrompt(result.jev_relevance_prompt);
+      setJevEnabled(result.jev_relevance_enabled);
     }).catch((error: unknown) => {
       if (alive) notify({ kind: 'error', message: userMessage(error) });
     }).finally(() => { if (alive) setLoading(false); });
@@ -65,6 +71,30 @@ export default function ThreadsSettingsPage({ notify }: Props) {
     } catch (error) {
       notify({ kind: 'error', message: userMessage(error) });
       setConnecting(false);
+    }
+  }
+
+  async function saveJevSettings(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setJevSaving(true);
+    try {
+      const result = await api<Settings>('/settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          openrouter_api_key: openRouterKey,
+          jev_relevance_enabled: jevEnabled,
+          jev_relevance_prompt: jevPrompt,
+        }),
+      });
+      setSettings(result);
+      setOpenRouterKey('');
+      setJevPrompt(result.jev_relevance_prompt);
+      setJevEnabled(result.jev_relevance_enabled);
+      notify({ kind: 'success', message: 'Настройки фильтра Jev сохранены.' });
+    } catch (error) {
+      notify({ kind: 'error', message: userMessage(error) });
+    } finally {
+      setJevSaving(false);
     }
   }
 
@@ -183,6 +213,60 @@ export default function ThreadsSettingsPage({ notify }: Props) {
               </details>
             </div>
           </>
+        )}
+      </section>
+
+      <section className="mb-5 rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
+        <div className="mb-5 flex items-start gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#f0eef9] text-[#6a5c9a]"><KeyRound className="h-5 w-5" /></div>
+          <div className="flex-1">
+            <h2 className="font-bold text-ink">Фильтр релевантности Jev</h2>
+            <p className="mt-1 text-sm text-muted">Финальная проверка новых публикаций через OpenRouter. Модель: Jev · typesafe/jev-1.13.</p>
+          </div>
+          {settings?.jev_relevance_enabled && settings.openrouter_api_key_configured && <Badge tone="green"><Check className="mr-1 h-3 w-3" />Включён</Badge>}
+        </div>
+        {loading ? <div className="flex min-h-20 items-center justify-center"><Spinner label="Загружаем настройки…" /></div> : settings && (
+          <form onSubmit={(event) => void saveJevSettings(event)}>
+            <div className="grid gap-4">
+              <Input
+                label="OpenRouter API key"
+                type="password"
+                value={openRouterKey}
+                onChange={(event) => setOpenRouterKey(event.target.value)}
+                placeholder={settings.openrouter_api_key_configured ? 'Ключ сохранён · пустое поле оставит его без изменений' : 'Вставьте OpenRouter API key'}
+                autoComplete="new-password"
+              />
+              <p className="-mt-2 text-xs text-muted">Ключ хранится в настройках backend и не возвращается в браузер. Его также можно задать через OPENROUTER_API_KEY.</p>
+              <label className="flex items-start gap-3 rounded-xl border border-[#e8ecee] bg-[#fafbfb] p-4 text-sm">
+                <input
+                  className="mt-0.5 h-4 w-4 accent-[#7a9d45]"
+                  type="checkbox"
+                  checked={jevEnabled}
+                  disabled={!settings.openrouter_api_key_configured && !openRouterKey.trim()}
+                  onChange={(event) => setJevEnabled(event.target.checked)}
+                />
+                <span>
+                  <span className="block font-semibold text-ink">Проверять релевантность новых публикаций</span>
+                  <span className="mt-1 block text-xs leading-5 text-muted">Jev вызывается только для публикаций, которые прошли стоп-слова и проверку на дубликаты.</span>
+                </span>
+              </label>
+              <label className="block text-sm font-semibold text-ink">
+                Инструкция Jev
+                <textarea
+                  className="mt-2 min-h-36 w-full rounded-xl border border-[#dfe4e6] bg-white px-3 py-3 text-sm font-normal leading-6 text-ink focus:border-[#9abd61] focus:outline-none"
+                  value={jevPrompt}
+                  maxLength={4000}
+                  required
+                  onChange={(event) => setJevPrompt(event.target.value)}
+                />
+                <span className="mt-1 block text-xs font-normal text-muted">Вопрос будет задан о state.post и state.keyword. Можно описать, какие упоминания считать релевантными.</span>
+              </label>
+            </div>
+            <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#edf0f1] pt-4">
+              <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#577738] hover:text-ink">Получить API key <ExternalLink className="h-3 w-3" /></a>
+              <Button type="submit" disabled={jevSaving}><Save className="h-4 w-4" />{jevSaving ? 'Сохраняем…' : 'Сохранить фильтр'}</Button>
+            </div>
+          </form>
         )}
       </section>
 
