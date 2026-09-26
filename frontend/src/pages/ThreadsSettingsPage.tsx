@@ -79,6 +79,7 @@ export default function ThreadsSettingsPage({ notify, section }: Props) {
     event.preventDefault();
     setJevSaving(true);
     try {
+      const promptChanged = settings?.jev_relevance_prompt !== jevPrompt.trim();
       const result = await api<Settings>('/settings', {
         method: 'PUT',
         body: JSON.stringify({
@@ -91,7 +92,13 @@ export default function ThreadsSettingsPage({ notify, section }: Props) {
       setOpenRouterKey('');
       setJevPrompt(result.jev_relevance_prompt);
       setJevEnabled(result.jev_relevance_enabled);
-      notify({ kind: 'success', message: 'Настройки фильтра Jev сохранены.' });
+      const reprocessingStarted = promptChanged && result.jev_relevance_enabled && result.openrouter_api_key_configured;
+      notify({
+        kind: 'success',
+        message: reprocessingStarted
+          ? 'Настройки сохранены. Посты за последние 7 дней перепроверяются в фоне.'
+          : 'Настройки фильтра Jev сохранены.',
+      });
     } catch (error) {
       notify({ kind: 'error', message: userMessage(error) });
     } finally {
