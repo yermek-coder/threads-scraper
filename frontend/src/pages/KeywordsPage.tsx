@@ -116,7 +116,7 @@ export default function KeywordsPage({ notify }: Props) {
 
   return (
     <div className="animate-enter">
-      <PageHeading eyebrow="Управление сбором" title="Ключевые слова" description="Добавляйте поисковые фразы и исключайте публикации со стоп-словами." />
+      <PageHeading title="Ключевые слова" description="Добавляйте поисковые фразы и исключайте публикации со стоп-словами." />
 
       <section className="mb-5 rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
         <div className="mb-5 flex items-start gap-3">

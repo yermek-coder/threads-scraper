@@ -94,11 +94,10 @@ export function Textarea({ label, className = '', ...props }: React.TextareaHTML
   );
 }
 
-export function PageHeading({ eyebrow, title, description, action }: { eyebrow?: string; title: string; description?: string; action?: ReactNode }) {
+export function PageHeading({ title, description, action }: { title: string; description?: string; action?: ReactNode }) {
   return (
     <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
       <div>
-        {eyebrow && <p className="mb-2 text-xs font-bold uppercase tracking-[.16em] text-[#839096]">{eyebrow}</p>}
         <h1 className="text-[26px] font-bold tracking-[-.04em] text-ink sm:text-[30px]">{title}</h1>
         {description && <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">{description}</p>}
       </div>

@@ -181,7 +181,7 @@ export default function NotificationsPage({ notify }: Props) {
 
   return (
     <div className="animate-enter">
-      <PageHeading eyebrow="Каналы оповещений" title="WhatsApp и Email" description="Подключите WhatsApp и настройте получателей уведомлений о новых публикациях." />
+      <PageHeading title="WhatsApp и Email" description="Подключите WhatsApp и настройте получателей уведомлений о новых публикациях." />
 
       <section className="mb-5 rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">

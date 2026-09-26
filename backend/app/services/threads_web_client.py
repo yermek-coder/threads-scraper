@@ -100,9 +100,6 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                   const anchors = Array.from(document.querySelectorAll('a[href*="/post/"]'));
                   const found = new Map();
                   for (const anchor of anchors) {
-                    // The detail-page title also links to the post, but it is outside
-                    // the post card and would make the fallback walk up the whole feed.
-                    if (anchor.getAttribute('aria-label') === 'Column title') continue;
                     const url = new URL(anchor.href, location.href);
                     const parts = url.pathname.split('/').filter(Boolean);
                     const postIndex = parts.indexOf('post');

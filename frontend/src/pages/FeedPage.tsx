@@ -348,9 +348,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
   return (
     <div className="animate-enter">
       <PageHeading
-        eyebrow="Мониторинг Threads"
         title="Лента упоминаний"
-        description="Новые публикации по вашим ключевым словам — в одном месте."
         action={<Button onClick={() => void collectNow()} disabled={collecting || activeKeywords === 0} className="min-h-11 bg-[#c5f36a] text-ink hover:bg-[#b5e45c] disabled:bg-[#e3e8df]">
           <RefreshCw className={`h-4 w-4 ${collecting ? 'animate-spin' : ''}`} />{collecting ? 'Собираем…' : 'Запустить сбор'}
         </Button>}
@@ -372,19 +370,17 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
       </section>
 
       <section className="mb-5 rounded-2xl border border-[#e5e9ea] bg-white p-4 shadow-card sm:p-5" aria-label="Фильтры ленты">
-        <div className="grid gap-4 xl:grid-cols-[minmax(220px,1fr)_minmax(190px,.7fr)_auto] xl:items-end">
-          <label className="grid gap-2 text-sm font-medium text-[#344248]">
-            <span>Поиск в постах</span>
-            <span className="relative">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#94a0a4]" />
-              <input className="h-11 w-full rounded-xl border border-[#dfe4e6] bg-white pl-9 pr-3.5 text-sm placeholder:text-[#a0aaae] focus:border-[#9abd61] focus:outline-none" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Автор или текст…" />
-            </span>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(250px,1fr)_minmax(210px,.68fr)_minmax(max-content,1.45fr)] xl:items-center">
+          <label className="relative block">
+            <span className="sr-only">Поиск в постах</span>
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#94a0a4]" aria-hidden="true" />
+            <input aria-label="Поиск в постах" className="h-11 w-full rounded-xl border border-[#dfe4e6] bg-white pl-9 pr-3.5 text-sm placeholder:text-[#a0aaae] focus:border-[#9abd61] focus:outline-none" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Автор или текст…" />
           </label>
-          <Select label="Ключевая фраза" value={keywordId} onChange={(event) => { setKeywordId(event.target.value); setPage(1); }}>
+          <Select aria-label="Ключевая фраза" value={keywordId} onChange={(event) => { setKeywordId(event.target.value); setPage(1); }}>
             <option value="">Все фразы</option>
             {keywords.map((keyword) => <option key={keyword.id} value={keyword.id}>{keyword.phrase}{keyword.is_active ? '' : ' · выключена'}</option>)}
           </Select>
-          <div className="flex flex-wrap gap-x-5 gap-y-3 pb-1 xl:justify-end">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-3 md:col-span-2 xl:col-span-1 xl:justify-end">
             <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#55646a]"><input type="checkbox" className="h-4 w-4 accent-[#79a93c]" checked={unreadOnly} onChange={(event) => { setUnreadOnly(event.target.checked); setPage(1); }} />Только новые</label>
             <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#55646a]"><input type="checkbox" className="h-4 w-4 accent-[#79a93c]" checked={hideIrrelevant} onChange={(event) => { setHideIrrelevant(event.target.checked); setPage(1); }} />Скрыть нерелевантные</label>
             <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#55646a]"><input type="checkbox" className="h-4 w-4 accent-[#79a93c]" checked={includeDuplicates} onChange={(event) => { setIncludeDuplicates(event.target.checked); setPage(1); }} />Показать дубликаты</label>

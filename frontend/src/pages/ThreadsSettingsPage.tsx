@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Check, Copy, ExternalLink, FileUp, KeyRound, Link2, LoaderCircle, Save, ShieldCheck, Trash2 } from 'lucide-react';
+import { Check, Copy, ExternalLink, FileUp, Link2, LoaderCircle, Save, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, userMessage } from '../api';
 import { Badge, Button, Input, PageHeading, Spinner, type Notice } from '../components';
 import type { Settings } from '../types';
 
-type Props = { notify: (notice: Notice) => void };
+export type ThreadsSection = 'collection' | 'relevance' | 'graph' | 'webhook';
+type Props = { notify: (notice: Notice) => void; section: ThreadsSection };
 const PRODUCTION_ORIGIN = 'https://monitor.example.com';
 const getPublicOrigin = () => {
   if (typeof window === 'undefined') return PRODUCTION_ORIGIN;
@@ -14,7 +15,7 @@ const getPublicOrigin = () => {
   return window.location.origin;
 };
 
-export default function ThreadsSettingsPage({ notify }: Props) {
+export default function ThreadsSettingsPage({ notify, section }: Props) {
   const publicOrigin = getPublicOrigin();
   const callbackUrl = `${publicOrigin}/api/webhooks/threads`;
   const oauthCallbackUrl = `${publicOrigin}/api/threads/oauth/callback`;
@@ -162,16 +163,18 @@ export default function ThreadsSettingsPage({ notify }: Props) {
   }
 
   const verifyToken = settings?.threads_verify_token ?? '';
+  const headings: Record<ThreadsSection, { title: string; description: string }> = {
+    collection: { title: 'Сбор публикаций', description: 'Выберите метод сбора и управляйте авторизованной web-сессией Threads.' },
+    relevance: { title: 'Фильтр релевантности', description: 'Настройте проверку новых публикаций через Jev и OpenRouter.' },
+    graph: { title: 'Threads Graph API', description: 'Подключите API для альтернативного поиска по ключевым словам.' },
+    webhook: { title: 'Webhook Threads', description: 'Настройте адрес обратного вызова и подписку на события Threads.' },
+  };
 
   return (
     <div className="animate-enter">
-      <PageHeading eyebrow="Интеграция Meta" title="Настройки Threads" description="Настройте основной сбор через web-поиск, альтернативный Graph API и webhook." />
+      <PageHeading title={headings[section].title} description={headings[section].description} />
 
-      <section className="mb-5 rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
-        <div className="mb-5 flex items-start gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#eaf2f7] text-[#4d7890]"><FileUp className="h-5 w-5" /></div>
-          <div><h2 className="font-bold text-ink">Способ сбора публикаций</h2><p className="mt-1 text-sm text-muted">Основной способ открывает поиск Threads в Chromium и читает карточки публикаций из страницы.</p></div>
-        </div>
+      {section === 'collection' && <section className="rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
         {loading ? <div className="flex min-h-20 items-center justify-center"><Spinner label="Загружаем настройки…" /></div> : settings && (
           <>
             <label className="block max-w-xl text-sm font-semibold text-ink">
@@ -214,17 +217,9 @@ export default function ThreadsSettingsPage({ notify }: Props) {
             </div>
           </>
         )}
-      </section>
+      </section>}
 
-      <section className="mb-5 rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
-        <div className="mb-5 flex items-start gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#f0eef9] text-[#6a5c9a]"><KeyRound className="h-5 w-5" /></div>
-          <div className="flex-1">
-            <h2 className="font-bold text-ink">Фильтр релевантности Jev</h2>
-            <p className="mt-1 text-sm text-muted">Финальная проверка новых публикаций через OpenRouter. Модель: Jev · typesafe/jev-1.13.</p>
-          </div>
-          {settings?.jev_relevance_enabled && settings.openrouter_api_key_configured && <Badge tone="green"><Check className="mr-1 h-3 w-3" />Включён</Badge>}
-        </div>
+      {section === 'relevance' && <section className="rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
         {loading ? <div className="flex min-h-20 items-center justify-center"><Spinner label="Загружаем настройки…" /></div> : settings && (
           <form onSubmit={(event) => void saveJevSettings(event)}>
             <div className="grid gap-4">
@@ -268,14 +263,10 @@ export default function ThreadsSettingsPage({ notify }: Props) {
             </div>
           </form>
         )}
-      </section>
+      </section>}
 
+      {section === 'graph' && <>
       <section className="mb-5 rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
-        <div className="mb-5 flex items-start gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#f0eef9] text-[#6a5c9a]"><KeyRound className="h-5 w-5" /></div>
-          <div className="flex-1"><h2 className="font-bold text-ink">Доступ к Threads Graph API</h2><p className="mt-1 text-sm text-muted">Нужен для альтернативного метода threads_keyword_search; web-поиск использует авторизованную сессию отдельно.</p></div>
-          {settings?.threads_access_token_configured && <Badge tone="green"><Check className="mr-1 h-3 w-3" />Подключён</Badge>}
-        </div>
         {loading ? <div className="flex min-h-40 items-center justify-center"><Spinner label="Загружаем настройки…" /></div> : (
           <>
             <div className="rounded-xl border border-[#e8ecee] bg-[#fafbfb] p-4 sm:p-5">
@@ -327,12 +318,9 @@ export default function ThreadsSettingsPage({ notify }: Props) {
         </div>
         <p className="mt-4 text-xs leading-5 text-muted">Delete callback проверяет подпись Meta, удаляет сохранённые публикации и отключает связанный Threads аккаунт.</p>
       </section>
+      </>}
 
-      <section className="rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
-        <div className="mb-5 flex items-start gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#eaf2f7] text-[#4d7890]"><Link2 className="h-5 w-5" /></div>
-          <div><h2 className="font-bold text-ink">Webhook в панели Meta</h2><p className="mt-1 text-sm text-muted">Добавьте подписку на упоминания и ответы в настройках приложения Meta.</p></div>
-        </div>
+      {section === 'webhook' && <section className="rounded-2xl border border-[#e5e9ea] bg-white p-5 shadow-card sm:p-6">
         <div className="grid gap-4">
           <div className="rounded-xl border border-[#e8ecee] bg-[#fafbfb] p-4 sm:p-5">
             <div className="mb-2 text-xs font-bold uppercase tracking-[.12em] text-[#849096]">Callback URL</div>
@@ -358,7 +346,7 @@ export default function ThreadsSettingsPage({ notify }: Props) {
           </ol>
           <a href="https://developers.facebook.com/" target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-[#577738] hover:text-ink">Открыть Meta for Developers <ExternalLink className="h-3 w-3" /></a>
         </div>
-      </section>
+      </section>}
     </div>
   );
 }
