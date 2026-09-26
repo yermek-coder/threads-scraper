@@ -100,33 +100,62 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                   const anchors = Array.from(document.querySelectorAll('a[href*="/post/"]'));
                   const found = new Map();
                   for (const anchor of anchors) {
-                    let node = anchor;
-                    let card = null;
-                    for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
-                      const text = (node.innerText || '').trim();
-                      if (!card && text.length >= 20 && text.length <= 5000) card = node;
-                      if (node.matches('article,[role="article"]')) break;
-                    }
-                    if (!card) continue;
                     const url = new URL(anchor.href, location.href);
                     const parts = url.pathname.split('/').filter(Boolean);
                     const postIndex = parts.indexOf('post');
                     const postId = postIndex >= 0 ? parts[postIndex + 1] : '';
                     if (!postId || found.has(postId)) continue;
+                    const isCurrentPostLink = (link) => {
+                      const linkParts = new URL(link.href, location.href).pathname.split('/').filter(Boolean);
+                      const linkPostIndex = linkParts.indexOf('post');
+                      return linkPostIndex >= 0 && linkParts[linkPostIndex + 1] === postId;
+                    };
+
+                    // Threads commonly renders the timestamp link in the post header,
+                    // before the post body in DOM order. Prefer the semantic card so
+                    // that the selected container includes both pieces.
+                    let card = anchor.closest('article,[role="article"]');
+                    if (!card) {
+                      for (let node = anchor.parentElement, depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
+                        const cardText = (node.innerText || '').trim();
+                        if (cardText.length < 20 || cardText.length > 5000) continue;
+                        const hasBodyText = Array.from(node.querySelectorAll('[dir="auto"]')).some((element) => {
+                          if (element.closest('button,time')) return false;
+                          const postLink = element.closest('a[href*="/post/"]');
+                          if (postLink && isCurrentPostLink(postLink)) return false;
+                          const text = (element.innerText || '').trim();
+                          if (!text) return false;
+                          const link = element.closest('a[href]');
+                          if (link) {
+                            const path = new URL(link.href, location.href).pathname;
+                            if (path.startsWith('/@') && !path.includes('/post/')) return false;
+                          }
+                          return true;
+                        });
+                        if (hasBodyText) {
+                          card = node;
+                          break;
+                        }
+                      }
+                    }
+                    if (!card) continue;
+
                     const username = (parts.find((part) => part.startsWith('@')) || '').slice(1).toLowerCase();
                     const authorLink = Array.from(card.querySelectorAll('a[href]')).find((link) => {
                       const path = new URL(link.href, location.href).pathname;
                       return path.startsWith('/@') && !path.includes('/post/');
                     });
                     const authorText = (authorLink?.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                    const bodyTexts = Array.from(card.querySelectorAll('span[dir="auto"]'))
+                    const bodyTexts = Array.from(card.querySelectorAll('[dir="auto"]'))
                       .filter((element) => !element.closest('button,time'))
-                      .filter((element) => !element.querySelector('span[dir="auto"]'))
+                      .filter((element) => !element.querySelector('[dir="auto"]'))
                       .filter((element) => {
                         const link = element.closest('a[href]');
                         if (!link) return true;
                         const linkUrl = new URL(link.href, location.href);
                         if (linkUrl.pathname.startsWith('/@') && !linkUrl.pathname.includes('/post/')) return false;
+                        // The post permalink in Threads' header usually contains only its date.
+                        if (isCurrentPostLink(link)) return false;
                         if (linkUrl.pathname === '/search' && linkUrl.searchParams.has('location_id')) return false;
                         return true;
                       })
@@ -140,7 +169,7 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                         const normalized = text.toLowerCase();
                         if (!text || normalized === username || normalized === `@${username}` || normalized === authorText) return false;
                         if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(text)) return false;
-                        if (/^(?:\\d+\\s+views?|\\d+[smhdwy])$/i.test(text)) return false;
+                        if (/^(?:\\d+\\s+views?|\\d+\\s*(?:s|m|h|d|w|y|сек(?:унд[уы]?)?|с|мин(?:ута|уты|ут)?|ч(?:ас(?:а|ов)?)?|д|дн\\.?|д(?:ень|ня|ней)|нед(?:ел(?:я|и|ь))?\\.?|неделя|недели|недель|мес(?:\\.|яц(?:а|ев)?)?|г\\.?|год|года|лет|жыл|күн|сағ|апта)\\.?$)/iu.test(text)) return false;
                         return true;
                       });
                     const text = Array.from(new Set(bodyTexts)).join('\\n');
