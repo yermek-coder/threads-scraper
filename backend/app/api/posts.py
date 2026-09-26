@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,3 +107,13 @@ async def update_post_status(post_id: int, payload: PostStatusUpdate, db: DbDep)
         raw_data=post.raw_data,
         created_at=post.created_at,
     )
+
+
+@router.delete("/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_post(post_id: int, db: DbDep) -> None:
+    """Delete a collected post from the feed."""
+    post = await db.get(Post, post_id)
+    if post is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+    await db.delete(post)
+    await db.commit()

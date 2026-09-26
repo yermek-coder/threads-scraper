@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowDownWideNarrow, ArrowLeft, ArrowRight, Check, ExternalLink, Heart, MessageCircle, RefreshCw, Search, Sparkles } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowDownWideNarrow, ArrowLeft, ArrowRight, Check, ExternalLink, Heart, MessageCircle, MoreVertical, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react';
 import { api, toQuery, userMessage } from '../api';
 import { Badge, Button, EmptyState, PageHeading, Select, Spinner, type Notice } from '../components';
 import type { CollectResult, Keyword, Post, PostPage } from '../types';
@@ -13,13 +13,69 @@ function formatDate(value: string | null): string {
   return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
 }
 
+function PostActionsMenu({ post, busy, onDelete }: { post: Post; busy: boolean; onDelete: (post: Post) => void }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function handlePointerDown(event: PointerEvent) {
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target)) setOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false);
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative shrink-0" ref={menuRef}>
+      <button
+        type="button"
+        aria-label={`Действия с постом @${post.author_username || 'unknown'}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={busy}
+        onClick={() => setOpen((current) => !current)}
+        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-[#758187] transition hover:bg-[#eef1f2] hover:text-ink disabled:opacity-50"
+      >
+        <MoreVertical className="h-4 w-4" aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-10 z-20 min-w-44 rounded-xl border border-[#e5e9ea] bg-white p-1.5 shadow-lg" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            disabled={busy}
+            onClick={() => { setOpen(false); onDelete(post); }}
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-[#a44739] transition hover:bg-[#fff3f0] disabled:opacity-50"
+          >
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
+            Удалить пост
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PostCard({
   post,
   onStatus,
+  onDelete,
   busy = false,
 }: {
   post: Post;
   onStatus: (post: Post, patch: { is_read?: boolean; is_relevant?: boolean }) => void;
+  onDelete: (post: Post) => void;
   busy?: boolean;
 }) {
   const isSafeLink = Boolean(post.permalink && /^https?:\/\//i.test(post.permalink));
@@ -31,10 +87,13 @@ function PostCard({
           {(post.author_username || '?').slice(0, 1).toUpperCase()}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="font-semibold text-ink">@{post.author_username || 'unknown'}</span>
-            {!post.is_read && <span className="h-1.5 w-1.5 rounded-full bg-[#89b94e]" aria-label="Новый пост" />}
-            <span className="text-xs text-[#89959a]">{formatDate(post.post_timestamp)}</span>
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="font-semibold text-ink">@{post.author_username || 'unknown'}</span>
+              {!post.is_read && <span className="h-1.5 w-1.5 rounded-full bg-[#89b94e]" aria-label="Новый пост" />}
+              <span className="text-xs text-[#89959a]">{formatDate(post.post_timestamp)}</span>
+            </div>
+            <PostActionsMenu post={post} busy={busy} onDelete={onDelete} />
           </div>
           <div className="mt-3 whitespace-pre-wrap break-words text-[14px] leading-6 text-[#354248]">{post.text || 'Пост без текста'}</div>
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -154,6 +213,28 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
     }
   }
 
+  async function deletePost(post: Post) {
+    if (!window.confirm(`Удалить пост @${post.author_username || 'unknown'}? Это действие нельзя отменить.`)) return;
+    setBusyPostIds((current) => [...current, post.id]);
+    try {
+      await api<void>(`/posts/${post.id}`, { method: 'DELETE' });
+      if (data?.items.length === 1 && page > 1) {
+        setPage((current) => Math.max(1, current - 1));
+      } else {
+        setData((current) => current ? {
+          ...current,
+          items: current.items.filter((item) => item.id !== post.id),
+          total: Math.max(0, current.total - 1),
+        } : current);
+      }
+      notify({ kind: 'success', message: 'Пост удалён.' });
+    } catch (error) {
+      notify({ kind: 'error', message: userMessage(error) });
+    } finally {
+      setBusyPostIds((current) => current.filter((id) => id !== post.id));
+    }
+  }
+
   async function collectNow() {
     setCollecting(true);
     try {
@@ -249,6 +330,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
                 post={post}
                 busy={busyPostIds.includes(post.id)}
                 onStatus={(item, patch) => void updatePost(item, patch)}
+                onDelete={(item) => void deletePost(item)}
               />
             ))}
           </div>
