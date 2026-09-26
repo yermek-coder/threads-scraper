@@ -121,12 +121,7 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
             except PlaywrightTimeoutError:
                 logger.debug("Threads search cards did not expose caption text before timeout")
 
-            previous_count = 0
             for _ in range(4):
-                current_count = await page.locator('a[href*="/post/"]').count()
-                if current_count == previous_count and current_count > 0:
-                    break
-                previous_count = current_count
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await page.wait_for_timeout(1_200)
 
