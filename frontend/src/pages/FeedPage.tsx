@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownWideNarrow, ArrowLeft, ArrowRight, Check, ExternalLink, Heart, MessageCircle, MoreVertical, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react';
+import { ArrowDownWideNarrow, ArrowLeft, ArrowRight, Check, ExternalLink, Heart, MessageCircle, MoreVertical, RefreshCw, RotateCcw, Search, Sparkles, Trash2 } from 'lucide-react';
 import { api, toQuery, userMessage } from '../api';
 import { Badge, Button, EmptyState, PageHeading, Select, Spinner, type Notice } from '../components';
 import type { CollectResult, Keyword, Post, PostPage } from '../types';
@@ -69,11 +69,15 @@ function PostActionsMenu({ post, busy, onDelete }: { post: Post; busy: boolean; 
 
 function PostCard({
   post,
+  selected,
+  onSelect,
   onStatus,
   onDelete,
   busy = false,
 }: {
   post: Post;
+  selected: boolean;
+  onSelect: (post: Post, selected: boolean) => void;
   onStatus: (post: Post, patch: { is_read?: boolean; is_relevant?: boolean }) => void;
   onDelete: (post: Post) => void;
   busy?: boolean;
@@ -83,6 +87,14 @@ function PostCard({
   return (
     <article className={`rounded-2xl border bg-white p-5 shadow-card transition sm:p-6 ${post.is_read ? 'border-[#e5e9ea]' : 'border-[#dce7cf] ring-1 ring-[#edf4e4]'}`}>
       <div className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          aria-label={`Выбрать пост @${post.author_username || 'unknown'}`}
+          checked={selected}
+          disabled={busy}
+          onChange={(event) => onSelect(post, event.target.checked)}
+          className="mt-3 h-4 w-4 shrink-0 cursor-pointer accent-[#79a93c] disabled:cursor-not-allowed"
+        />
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#eef2ed] text-sm font-bold text-[#51635a]">
           {(post.author_username || '?').slice(0, 1).toUpperCase()}
         </div>
@@ -143,6 +155,9 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
   const [busyPostIds, setBusyPostIds] = useState<number[]>([]);
+  const [selectedPostIds, setSelectedPostIds] = useState<number[]>([]);
+  const [bulkAction, setBulkAction] = useState<'status' | 'delete' | null>(null);
+  const [feedRefreshKey, setFeedRefreshKey] = useState(0);
   const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
@@ -174,6 +189,10 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
   }), [page, keywordId, unreadOnly, hideIrrelevant, includeDuplicates, debouncedSearch]);
 
   useEffect(() => {
+    setSelectedPostIds([]);
+  }, [query]);
+
+  useEffect(() => {
     let alive = true;
     const controller = new AbortController();
     setLoading(true);
@@ -196,12 +215,13 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
       alive = false;
       controller.abort();
     };
-  }, [query]);
+  }, [query, feedRefreshKey]);
 
   async function updatePost(post: Post, patch: { is_read?: boolean; is_relevant?: boolean }) {
     setBusyPostIds((current) => [...current, post.id]);
     try {
       await api<Post>(`/posts/${post.id}/status`, { method: 'PATCH', body: JSON.stringify(patch) });
+      setSelectedPostIds((current) => current.filter((id) => id !== post.id));
       setData((current) => current ? { ...current, items: current.items.map((item) => item.id === post.id ? { ...item, ...patch } : item) } : current);
       if ((hideIrrelevant && patch.is_relevant === false) || (unreadOnly && patch.is_read === true)) {
         setData((current) => current ? { ...current, items: current.items.filter((item) => item.id !== post.id), total: Math.max(0, current.total - 1) } : current);
@@ -218,6 +238,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
     setBusyPostIds((current) => [...current, post.id]);
     try {
       await api<void>(`/posts/${post.id}`, { method: 'DELETE' });
+      setSelectedPostIds((current) => current.filter((id) => id !== post.id));
       if (data?.items.length === 1 && page > 1) {
         setPage((current) => Math.max(1, current - 1));
       } else {
@@ -233,6 +254,69 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
     } finally {
       setBusyPostIds((current) => current.filter((id) => id !== post.id));
     }
+  }
+
+  async function updateSelectedPosts(patch: { is_read?: boolean; is_relevant?: boolean }, actionLabel: string) {
+    const ids = [...selectedPostIds];
+    if (!ids.length || busyPostIds.length > 0) return;
+
+    setBulkAction('status');
+    const results = await Promise.allSettled(ids.map((id) => api<Post>(`/posts/${id}/status`, { method: 'PATCH', body: JSON.stringify(patch) })));
+    const succeededIds = ids.filter((_, index) => results[index].status === 'fulfilled');
+    const succeededSet = new Set(succeededIds);
+    const visibleItemCount = data?.items.length ?? 0;
+    const removedOnPage = data?.items.filter((item) => succeededSet.has(item.id) && ((hideIrrelevant && patch.is_relevant === false) || (unreadOnly && patch.is_read === true))).length ?? 0;
+    const allVisibleItemsRemoved = visibleItemCount > 0 && removedOnPage === visibleItemCount;
+
+    setData((current) => {
+      if (!current) return current;
+      const updated = current.items.map((item) => succeededSet.has(item.id) ? { ...item, ...patch } : item);
+      const visible = updated.filter((item) => !((hideIrrelevant && patch.is_relevant === false && succeededSet.has(item.id)) || (unreadOnly && patch.is_read === true && succeededSet.has(item.id))));
+      return { ...current, items: visible, total: Math.max(0, current.total - (updated.length - visible.length)) };
+    });
+    setSelectedPostIds([]);
+    setBulkAction(null);
+
+    const failedCount = ids.length - succeededIds.length;
+    if (failedCount === 0) {
+      notify({ kind: 'success', message: `${actionLabel}: ${succeededIds.length}.` });
+    } else {
+      const failure = results.find((result) => result.status === 'rejected');
+      notify({ kind: 'error', message: `Успешно ${succeededIds.length} из ${ids.length}. ${failure?.status === 'rejected' ? userMessage(failure.reason) : 'Не удалось обновить часть постов.'}` });
+    }
+    if (allVisibleItemsRemoved && page > 1) setPage((current) => Math.max(1, current - 1));
+    else if (allVisibleItemsRemoved && page === 1 && (data?.total ?? 0) > removedOnPage) setFeedRefreshKey((current) => current + 1);
+  }
+
+  async function deleteSelectedPosts() {
+    const ids = [...selectedPostIds];
+    if (!ids.length || busyPostIds.length > 0) return;
+    if (!window.confirm(`Удалить выбранные посты (${ids.length})? Это действие нельзя отменить.`)) return;
+
+    setBulkAction('delete');
+    const results = await Promise.allSettled(ids.map((id) => api<void>(`/posts/${id}`, { method: 'DELETE' })));
+    const succeededIds = ids.filter((_, index) => results[index].status === 'fulfilled');
+    const succeededSet = new Set(succeededIds);
+    const visibleItemCount = data?.items.length ?? 0;
+    const allVisibleItemsDeleted = visibleItemCount > 0 && succeededIds.length === visibleItemCount;
+    setData((current) => current ? {
+      ...current,
+      items: current.items.filter((item) => !succeededSet.has(item.id)),
+      total: Math.max(0, current.total - succeededIds.length),
+    } : current);
+    setSelectedPostIds([]);
+    setBulkAction(null);
+
+    const failedCount = ids.length - succeededIds.length;
+    if (failedCount === 0) {
+      notify({ kind: 'success', message: `Удалено постов: ${succeededIds.length}.` });
+    } else {
+      const failure = results.find((result) => result.status === 'rejected');
+      notify({ kind: 'error', message: `Удалено ${succeededIds.length} из ${ids.length}. ${failure?.status === 'rejected' ? userMessage(failure.reason) : 'Не удалось удалить часть постов.'}` });
+    }
+
+    if (allVisibleItemsDeleted && page > 1) setPage((current) => Math.max(1, current - 1));
+    else if (allVisibleItemsDeleted && page === 1 && (data?.total ?? 0) > succeededIds.length) setFeedRefreshKey((current) => current + 1);
   }
 
   async function collectNow() {
@@ -259,6 +343,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
   const activeKeywords = keywords.filter((keyword) => keyword.is_active).length;
+  const feedBusy = bulkAction !== null || busyPostIds.length > 0;
 
   return (
     <div className="animate-enter">
@@ -323,12 +408,44 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
             <span>Показаны публикации {((page - 1) * 20) + 1}–{Math.min(page * 20, data!.total)} из {data!.total}</span>
             <span>Сначала новые</span>
           </div>
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl border border-[#e5e9ea] bg-white p-3 shadow-card sm:p-4">
+            <label className="mr-auto inline-flex cursor-pointer items-center gap-2 px-1 text-sm font-medium text-[#55646a]">
+              <input
+                type="checkbox"
+                checked={Boolean(data!.items.length) && data!.items.every((post) => selectedPostIds.includes(post.id))}
+                disabled={feedBusy}
+                onChange={(event) => setSelectedPostIds(event.target.checked ? data!.items.map((post) => post.id) : [])}
+                className="h-4 w-4 cursor-pointer accent-[#79a93c] disabled:cursor-not-allowed"
+              />
+              Выбрать все на странице
+            </label>
+            {selectedPostIds.length > 0 && (
+              <>
+                <span className="px-1 text-xs font-semibold text-[#758187]">Выбрано: {selectedPostIds.length}</span>
+                <Button variant="secondary" className="min-h-9 rounded-lg px-3 text-xs" disabled={feedBusy} onClick={() => void updateSelectedPosts({ is_read: true }, 'Прочитано постов')}>
+                  <Check className="h-3.5 w-3.5" />Прочитано
+                </Button>
+                <Button variant="secondary" className="min-h-9 rounded-lg px-3 text-xs" disabled={feedBusy} onClick={() => void updateSelectedPosts({ is_read: false }, 'Возвращено в статус новых')}>
+                  <RotateCcw className="h-3.5 w-3.5" />В новые
+                </Button>
+                <Button variant="quiet" className="min-h-9 rounded-lg px-3 text-xs text-[#9a665b] hover:bg-[#fff3f0] hover:text-[#9a4235]" disabled={feedBusy} onClick={() => void updateSelectedPosts({ is_relevant: false }, 'Постов помечено нерелевантными')}>
+                  Нерелевантно
+                </Button>
+                <Button variant="danger" className="min-h-9 rounded-lg px-3 text-xs" disabled={feedBusy} onClick={() => void deleteSelectedPosts()}>
+                  <Trash2 className="h-3.5 w-3.5" />Удалить
+                </Button>
+              </>
+            )}
+            {bulkAction && <span className="px-1 text-xs text-[#758187]" role="status">{bulkAction === 'delete' ? 'Удаляем…' : 'Сохраняем…'}</span>}
+          </div>
           <div className="grid gap-3">
             {data!.items.map((post) => (
               <PostCard
                 key={post.id}
                 post={post}
-                busy={busyPostIds.includes(post.id)}
+                selected={selectedPostIds.includes(post.id)}
+                onSelect={(item, selected) => setSelectedPostIds((current) => selected ? [...new Set([...current, item.id])] : current.filter((id) => id !== item.id))}
+                busy={busyPostIds.includes(post.id) || bulkAction !== null}
                 onStatus={(item, patch) => void updatePost(item, patch)}
                 onDelete={(item) => void deletePost(item)}
               />

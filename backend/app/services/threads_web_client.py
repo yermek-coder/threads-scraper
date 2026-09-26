@@ -100,6 +100,9 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                   const anchors = Array.from(document.querySelectorAll('a[href*="/post/"]'));
                   const found = new Map();
                   for (const anchor of anchors) {
+                    // The detail-page title also links to the post, but it is outside
+                    // the post card and would make the fallback walk up the whole feed.
+                    if (anchor.getAttribute('aria-label') === 'Column title') continue;
                     const url = new URL(anchor.href, location.href);
                     const parts = url.pathname.split('/').filter(Boolean);
                     const postIndex = parts.indexOf('post');
@@ -120,7 +123,9 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                         const cardText = (node.innerText || '').trim();
                         if (cardText.length < 20 || cardText.length > 5000) continue;
                         const hasBodyText = Array.from(node.querySelectorAll('[dir="auto"]')).some((element) => {
-                          if (element.closest('button,time')) return false;
+                          // Threads renders engagement counts inside div[role=button],
+                          // not only native button elements. Never treat them as post text.
+                          if (element.closest('button,[role="button"],time')) return false;
                           const postLink = element.closest('a[href*="/post/"]');
                           if (postLink && isCurrentPostLink(postLink)) return false;
                           const text = (element.innerText || '').trim();
@@ -146,8 +151,36 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                       return path.startsWith('/@') && !path.includes('/post/');
                     });
                     const authorText = (authorLink?.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const monthNames = new Set([
+                      'jan', 'january', 'feb', 'february', 'mar', 'march', 'apr', 'april', 'may', 'jun', 'june',
+                      'jul', 'july', 'aug', 'august', 'sep', 'sept', 'september', 'oct', 'october', 'nov',
+                      'november', 'dec', 'december', 'янв', 'январь', 'января', 'фев', 'февраль', 'февраля',
+                      'мар', 'март', 'марта', 'апр', 'апрель', 'апреля', 'май', 'мая', 'июн', 'июнь', 'июня',
+                      'июл', 'июль', 'июля', 'авг', 'август', 'августа', 'сен', 'сент', 'сентябрь', 'сентября',
+                      'окт', 'октябрь', 'октября', 'ноя', 'нояб', 'ноябрь', 'ноября', 'дек', 'декабрь', 'декабря',
+                      'қаңтар', 'ақпан', 'наурыз', 'сәуір', 'мамыр', 'маусым', 'шілде', 'тамыз', 'қыркүйек',
+                      'қазан', 'қараша', 'желтоқсан'
+                    ]);
+                    const isDateOnly = (value) => {
+                      if (/^(?:\\d{1,2}[./]\\d{1,2}[./]\\d{2,4}|\\d{4}[-./]\\d{1,2}[-./]\\d{1,2})$/.test(value)) return true;
+                      const parts = value.toLowerCase().replace(/,/g, '').trim().split(/\\s+/).filter(Boolean);
+                      if (['г', 'года'].includes(parts[parts.length - 1]?.replace(/\\.$/, ''))) parts.pop();
+                      const normalized = parts.map((part) => part.replace(/\\.$/, ''));
+                      const isDay = (part) => /^\\d{1,2}$/.test(part);
+                      const isYear = (part) => /^\\d{2,4}$/.test(part);
+                      const isMonth = (part) => monthNames.has(part);
+                      if (normalized.length === 2) {
+                        return (isDay(normalized[0]) && isMonth(normalized[1])) || (isMonth(normalized[0]) && isDay(normalized[1]));
+                      }
+                      if (normalized.length === 3) {
+                        return (isMonth(normalized[0]) && isDay(normalized[1]) && isYear(normalized[2]))
+                          || (isDay(normalized[0]) && isMonth(normalized[1]) && isYear(normalized[2]))
+                          || (isYear(normalized[0]) && isMonth(normalized[1]) && isDay(normalized[2]));
+                      }
+                      return false;
+                    };
                     const bodyTexts = Array.from(card.querySelectorAll('[dir="auto"]'))
-                      .filter((element) => !element.closest('button,time'))
+                      .filter((element) => !element.closest('button,[role="button"],time'))
                       .filter((element) => !element.querySelector('[dir="auto"]'))
                       .filter((element) => {
                         const link = element.closest('a[href]');
@@ -168,7 +201,7 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                       .filter((text) => {
                         const normalized = text.toLowerCase();
                         if (!text || normalized === username || normalized === `@${username}` || normalized === authorText) return false;
-                        if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(text)) return false;
+                        if (isDateOnly(text)) return false;
                         if (/^(?:\\d+\\s+views?|\\d+\\s*(?:s|m|h|d|w|y|сек(?:унд[уы]?)?|с|мин(?:ута|уты|ут)?|ч(?:ас(?:а|ов)?)?|д|дн\\.?|д(?:ень|ня|ней)|нед(?:ел(?:я|и|ь))?\\.?|неделя|недели|недель|мес(?:\\.|яц(?:а|ев)?)?|г\\.?|год|года|лет|жыл|күн|сағ|апта)\\.?$)/iu.test(text)) return false;
                         return true;
                       });
