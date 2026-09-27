@@ -91,6 +91,7 @@ class PostRead(BaseModel):
     post_timestamp: datetime | None
     likes_count: int
     replies_count: int
+    reposts_count: int
     matched_keyword_id: int | None
     matched_keyword: str | None = None
     is_relevant: bool

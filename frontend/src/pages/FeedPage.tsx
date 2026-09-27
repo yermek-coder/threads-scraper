@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownWideNarrow, ArrowLeft, ArrowRight, Check, ExternalLink, Heart, MessageCircle, MoreVertical, RefreshCw, RotateCcw, Search, Sparkles, Trash2 } from 'lucide-react';
+import { ArrowDownWideNarrow, ArrowLeft, ArrowRight, Check, ExternalLink, Heart, MessageCircle, MoreVertical, RefreshCw, Repeat2, RotateCcw, Search, Sparkles, Trash2 } from 'lucide-react';
 import { api, toQuery, userMessage } from '../api';
 import { Badge, Button, EmptyState, PageHeading, Select, Spinner, type Notice } from '../components';
 import type { CollectResult, Keyword, Post, PostPage } from '../types';
@@ -141,9 +141,10 @@ function PostCard({
             {post.is_duplicate && <Badge tone="neutral">Дубликат{post.duplicate_of_id ? ` · #${post.duplicate_of_id}` : ''}</Badge>}
           </div>
           <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#f0f2f3] pt-4">
-            <div className="flex items-center gap-4 text-xs text-[#859196]">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-[#859196]">
               <span className="inline-flex items-center gap-1.5"><Heart className="h-3.5 w-3.5" />{post.likes_count}</span>
               <span className="inline-flex items-center gap-1.5"><MessageCircle className="h-3.5 w-3.5" />{post.replies_count}</span>
+              <span className="inline-flex items-center gap-1.5" title="Репосты"><Repeat2 className="h-3.5 w-3.5" aria-hidden="true" />{post.reposts_count}</span>
               {isSafeLink ? (
                 <a href={post.permalink} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 font-semibold text-[#607a47] hover:text-ink">
                   Открыть в Threads <ExternalLink className="h-3 w-3" />
@@ -175,6 +176,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [hideIrrelevant, setHideIrrelevant] = useState(true);
   const [includeDuplicates, setIncludeDuplicates] = useState(false);
+  const [sortBy, setSortBy] = useState<'newest' | 'engagement'>('newest');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -213,7 +215,8 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
     hide_irrelevant: hideIrrelevant,
     include_duplicates: includeDuplicates,
     q: debouncedSearch.trim() || undefined,
-  }), [page, keywordId, unreadOnly, hideIrrelevant, includeDuplicates, debouncedSearch]);
+    sort_by: sortBy,
+  }), [page, keywordId, unreadOnly, hideIrrelevant, includeDuplicates, debouncedSearch, sortBy]);
 
   useEffect(() => {
     setSelectedPostIds([]);
@@ -363,8 +366,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
       notify({ kind: hasIssues ? 'error' : 'success', message });
       void loadKeywords();
       setPage(1);
-      const fresh = await api<PostPage>(`/posts${toQuery({ page: 1, page_size: 20, keyword_id: keywordId ? Number(keywordId) : undefined, unread_only: unreadOnly, hide_irrelevant: hideIrrelevant, include_duplicates: includeDuplicates, q: debouncedSearch.trim() || undefined })}`);
-      setData(fresh);
+      setFeedRefreshKey((current) => current + 1);
     } catch (error) {
       notify({ kind: 'error', message: userMessage(error) });
     } finally {
@@ -401,7 +403,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
       </section>
 
       <section className="mb-5 rounded-2xl border border-[#e5e9ea] bg-white p-4 shadow-card sm:p-5" aria-label="Фильтры ленты">
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(250px,1fr)_minmax(210px,.68fr)_minmax(max-content,1.45fr)] xl:items-center">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(250px,1fr)_minmax(210px,.68fr)_minmax(190px,.65fr)] xl:items-center">
           <label className="relative block">
             <span className="sr-only">Поиск в постах</span>
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#94a0a4]" aria-hidden="true" />
@@ -411,7 +413,11 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
             <option value="">Все фразы</option>
             {keywords.map((keyword) => <option key={keyword.id} value={keyword.id}>{keyword.phrase}{keyword.is_active ? '' : ' · выключена'}</option>)}
           </Select>
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-3 md:col-span-2 xl:col-span-1 xl:justify-end">
+          <Select aria-label="Сортировка ленты" value={sortBy} onChange={(event) => { setSortBy(event.target.value as 'newest' | 'engagement'); setPage(1); }}>
+            <option value="newest">Сначала новые</option>
+            <option value="engagement">По вовлечённости</option>
+          </Select>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-3 md:col-span-2 xl:col-span-3 xl:justify-end">
             <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#55646a]"><input type="checkbox" className="h-4 w-4 accent-[#79a93c]" checked={unreadOnly} onChange={(event) => { setUnreadOnly(event.target.checked); setPage(1); }} />Только новые</label>
             <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#55646a]"><input type="checkbox" className="h-4 w-4 accent-[#79a93c]" checked={hideIrrelevant} onChange={(event) => { setHideIrrelevant(event.target.checked); setPage(1); }} />Скрыть нерелевантные</label>
             <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#55646a]"><input type="checkbox" className="h-4 w-4 accent-[#79a93c]" checked={includeDuplicates} onChange={(event) => { setIncludeDuplicates(event.target.checked); setPage(1); }} />Показать дубликаты</label>
@@ -433,7 +439,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
         <>
           <div className="mb-3 flex items-center justify-between text-xs text-[#89959a]">
             <span>Показаны публикации {((page - 1) * 20) + 1}–{Math.min(page * 20, data!.total)} из {data!.total}</span>
-            <span>Сначала новые</span>
+            <span>{sortBy === 'engagement' ? 'По вовлечённости' : 'Сначала новые'}</span>
           </div>
           <div className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl border border-[#e5e9ea] bg-white p-3 shadow-card sm:p-4">
             <label className="mr-auto inline-flex cursor-pointer items-center gap-2 px-1 text-sm font-medium text-[#55646a]">

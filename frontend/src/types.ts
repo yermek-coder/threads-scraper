@@ -19,6 +19,7 @@ export type Post = {
   post_timestamp: string | null;
   likes_count: number;
   replies_count: number;
+  reposts_count: number;
   matched_keyword_id: number | null;
   matched_keyword: string | null;
   is_relevant: boolean;

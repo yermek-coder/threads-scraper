@@ -13,6 +13,8 @@ from urllib.parse import unquote, urljoin, urlparse
 PARSER_VERSION = "threads-post-dom-v2"
 API_PARSER_VERSION = "threads-graph-api-v1"
 POST_DOM_SOURCE = "threads_post_dom"
+SEARCH_DOM_SOURCE = "threads_search_dom"
+SEARCH_PARSER_VERSION = "threads-search-dom-v1"
 API_SOURCE = "threads_graph_api"
 THREADS_HOSTS = frozenset({"threads.com", "www.threads.com", "threads.net", "www.threads.net"})
 
@@ -593,6 +595,7 @@ def extraction_is_currently_confirmed(raw_data: dict[str, Any] | None, post_id: 
     diagnostic = extraction_diagnostic(raw_data, post_id)
     parser_versions = {
         POST_DOM_SOURCE: PARSER_VERSION,
+        SEARCH_DOM_SOURCE: SEARCH_PARSER_VERSION,
         API_SOURCE: API_PARSER_VERSION,
         "threads_webhook": "threads-webhook-v1",
     }
@@ -605,22 +608,47 @@ def extraction_is_currently_confirmed(raw_data: dict[str, Any] | None, post_id: 
     )
 
 
+def sanitized_search_engagement(raw_data: dict[str, Any] | None) -> dict[str, int | None] | None:
+    """Keep only validated, nonnegative search-card engagement counts."""
+    if not isinstance(raw_data, dict) or not isinstance(raw_data.get("search_engagement"), dict):
+        return None
+    source = raw_data["search_engagement"]
+
+    def count(field: str) -> int | None:
+        value = source.get(field)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+    reposts = count("reposts_count")
+    likes = count("likes_count")
+    replies = count("replies_count")
+    if reposts is None and likes is None and replies is None:
+        return None
+    return {"reposts_count": reposts if reposts is not None else 0, "likes_count": likes, "replies_count": replies}
+
+
 def add_extraction_diagnostic(raw_data: dict[str, Any] | None, extraction: PostExtraction) -> dict[str, Any]:
     """Write safe extraction metadata and preserve confirmed state on failed retries."""
     current = extraction_diagnostic(raw_data, extraction.post_id)
     attempted = extraction.diagnostic()
+    search_engagement = sanitized_search_engagement(raw_data)
     if extraction.confirmed or current.get("status") not in CONFIRMED_STATUSES:
-        return {"source": extraction.source, "extraction": attempted}
+        result = {"source": extraction.source, "extraction": attempted}
+        if search_engagement is not None:
+            result["search_engagement"] = search_engagement
+        return result
     previous = {
         key: current[key]
         for key in ("post_id", "source", "parser_version", "status", "reason", "attempted_at")
         if key in current
     }
-    return {
+    result = {
         "source": current.get("source") if isinstance(current.get("source"), str) else extraction.source,
         "extraction": previous,
         "extraction_last_attempt": attempted,
     }
+    if search_engagement is not None:
+        result["search_engagement"] = search_engagement
+    return result
 
 
 def parser_shape_fingerprint(card_html: str) -> str:

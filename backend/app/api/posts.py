@@ -1,10 +1,12 @@
 """Post feed, search/filter, and review status endpoints."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, func, select
+from sqlalchemy import BigInteger, String, and_, case, cast, func, or_, select
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.functions import FunctionElement
 
 from app.api.schemas import PostPage, PostRead, PostStatusUpdate
 from app.core.database import get_db
@@ -14,12 +16,56 @@ from app.services.threads_post_parser import extraction_diagnostic
 
 router = APIRouter(prefix="/posts", tags=["posts"], dependencies=[Depends(get_current_user)])
 DbDep = Annotated[AsyncSession, Depends(get_db)]
+_MAX_SAFE_REPOSTS = 999_999_999_999_999_999
+
+
+class _SearchRepostsJsonType(FunctionElement):
+    """Check the original JSON type before casting a search-card count."""
+
+    type = String()
+    inherit_cache = True
+
+
+@compiles(_SearchRepostsJsonType, "postgresql")
+def _postgres_reposts_type(element, compiler, **kwargs) -> str:
+    column = compiler.process(list(element.clauses)[0], **kwargs)
+    return f"json_typeof(({column} -> 'search_engagement') -> 'reposts_count')"
+
+
+@compiles(_SearchRepostsJsonType, "sqlite")
+def _sqlite_reposts_type(element, compiler, **kwargs) -> str:
+    column = compiler.process(list(element.clauses)[0], **kwargs)
+    return f"json_type({column}, '$.search_engagement.reposts_count')"
+
+
+def _safe_reposts_order_value():
+    raw_value = Post.raw_data["search_engagement"]["reposts_count"]
+    raw_text = cast(raw_value, String)
+    integer_json = or_(
+        _SearchRepostsJsonType(Post.raw_data) == "number",
+        _SearchRepostsJsonType(Post.raw_data) == "integer",
+    )
+    return case(
+        (and_(integer_json, raw_text.regexp_match(r"^[0-9]{1,18}$")), cast(raw_text, BigInteger)),
+        else_=0,
+    )
 
 
 def _post_read(post: Post, phrase: str | None) -> PostRead:
     diagnostic = extraction_diagnostic(post.raw_data, post.threads_post_id)
     raw_data = post.raw_data if isinstance(post.raw_data, dict) else {}
     last_attempt = raw_data.get("extraction_last_attempt")
+    search_engagement = raw_data.get("search_engagement")
+    raw_reposts_count = (
+        search_engagement.get("reposts_count") if isinstance(search_engagement, dict) else None
+    )
+    reposts_count = (
+        raw_reposts_count
+        if isinstance(raw_reposts_count, int)
+        and not isinstance(raw_reposts_count, bool)
+        and 0 <= raw_reposts_count <= _MAX_SAFE_REPOSTS
+        else 0
+    )
     status_value = str(diagnostic.get("status") or "legacy_unverified")
     safe_diagnostic = {
         "post_id": post.threads_post_id,
@@ -50,6 +96,7 @@ def _post_read(post: Post, phrase: str | None) -> PostRead:
         post_timestamp=post.post_timestamp,
         likes_count=post.likes_count,
         replies_count=post.replies_count,
+        reposts_count=reposts_count,
         matched_keyword_id=post.matched_keyword_id,
         matched_keyword=phrase,
         is_relevant=post.is_relevant,
@@ -85,8 +132,9 @@ async def list_posts(
     hide_irrelevant: bool = False,
     include_duplicates: bool = False,
     q: str | None = Query(default=None, max_length=500),
+    sort_by: Literal["newest", "engagement"] = Query(default="newest"),
 ) -> PostPage:
-    """Return a paginated feed with optional review, keyword, and text filters."""
+    """Return a paginated feed with optional filters and order."""
     filters = []
     if keyword_id is not None:
         filters.append(Post.matched_keyword_id == keyword_id)
@@ -106,12 +154,17 @@ async def list_posts(
         filters.append(verified_text | Post.author_username.ilike(term))
 
     total = int(await db.scalar(select(func.count(Post.id)).where(*filters)) or 0)
+    order_by = [Post.post_timestamp.desc().nulls_last(), Post.id.desc()]
+    if sort_by == "engagement":
+        reposts_count = _safe_reposts_order_value()
+        engagement = Post.likes_count + Post.replies_count + reposts_count
+        order_by.insert(0, engagement.desc())
     rows = (
         await db.execute(
             select(Post, Keyword.phrase)
             .outerjoin(Keyword, Keyword.id == Post.matched_keyword_id)
             .where(*filters)
-            .order_by(Post.post_timestamp.desc().nulls_last(), Post.id.desc())
+            .order_by(*order_by)
             .offset((page - 1) * page_size)
             .limit(page_size)
         )

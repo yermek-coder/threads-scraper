@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import unquote, urlparse
 
 THREADS_HOSTS = frozenset({"threads.com", "www.threads.com", "threads.net", "www.threads.net"})
@@ -10,11 +10,33 @@ THREADS_HOSTS = frozenset({"threads.com", "www.threads.com", "threads.net", "www
 
 @dataclass(slots=True, frozen=True)
 class DiscoveredPost:
-    """Identity-only candidate discovered from a search permalink."""
+    """Candidate discovered from a search permalink and optional engagement counts."""
 
     post_id: str
     username: str
     permalink: str
+    likes_count: int | None = None
+    replies_count: int | None = None
+    reposts_count: int | None = None
+
+
+def _optional_count(item: dict[str, object], field: str) -> int | None:
+    """Validate a count when the discovery script supplied one."""
+    if field not in item:
+        return None
+    value = item[field]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"search_candidate_{field}_invalid")
+    return value
+
+
+def _highest_known_count(previous: int | None, current: int | None) -> int | None:
+    """Keep the largest observed count, including when a later card omits it."""
+    if previous is None:
+        return current
+    if current is None:
+        return previous
+    return max(previous, current)
 
 
 def _validated_candidate(item: dict[str, object]) -> DiscoveredPost:
@@ -35,7 +57,14 @@ def _validated_candidate(item: dict[str, object]) -> DiscoveredPost:
         or parts[2] != post_id
     ):
         raise ValueError("search_candidate_permalink_identity_mismatch")
-    return DiscoveredPost(post_id=post_id, username=username, permalink=permalink)
+    return DiscoveredPost(
+        post_id=post_id,
+        username=username,
+        permalink=permalink,
+        likes_count=_optional_count(item, "likes_count"),
+        replies_count=_optional_count(item, "replies_count"),
+        reposts_count=_optional_count(item, "reposts_count"),
+    )
 
 
 def merge_discovery_batch(found: dict[str, DiscoveredPost], items: object) -> int:
@@ -55,6 +84,13 @@ def merge_discovery_batch(found: dict[str, DiscoveredPost], items: object) -> in
             urlparse(candidate.permalink).path,
         ):
             raise ValueError("conflicting_search_identity_for_post_id")
+        else:
+            found[candidate.post_id] = replace(
+                prior,
+                likes_count=_highest_known_count(prior.likes_count, candidate.likes_count),
+                replies_count=_highest_known_count(prior.replies_count, candidate.replies_count),
+                reposts_count=_highest_known_count(prior.reposts_count, candidate.reposts_count),
+            )
     return len(found) - before
 
 

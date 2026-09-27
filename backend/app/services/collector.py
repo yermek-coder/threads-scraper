@@ -14,19 +14,21 @@ from app.services.filter_service import recalculate_post_filter_state
 from app.services.notifier import send_posts
 from app.services.settings_service import get_setting
 from app.services.threads_client import search_keyword
+from app.services.threads_discovery import DiscoveredPost
 from app.services.threads_errors import ThreadsCollectionError
 from app.services.threads_post_parser import (
     CONFIRMED_STATUSES,
     ExtractionStatus,
     PostExtraction,
-    PARSER_VERSION,
-    POST_DOM_SOURCE,
+    SEARCH_DOM_SOURCE,
+    SEARCH_PARSER_VERSION,
     add_extraction_diagnostic,
     extraction_is_currently_confirmed,
     extraction_diagnostic,
     parse_api_post,
+    sanitized_search_engagement,
 )
-from app.services.threads_web_client import discover_keyword_posts, fetch_post_pages
+from app.services.threads_web_client import discover_keyword_posts
 
 logger = logging.getLogger(__name__)
 
@@ -96,31 +98,25 @@ async def collect_keyword(
         if not discovery.complete:
             logger.warning(
                 "Threads discovery diagnostic source=threads_search_dom parser_version=%s status=%s reason=%s rounds=%s",
-                "threads-search-discovery-v1",
+                SEARCH_PARSER_VERSION,
                 ExtractionStatus.INCOMPLETE.value,
                 discovery.reason,
                 discovery.rounds,
             )
         existing_rows = await _load_existing_posts(db, [candidate.post_id for candidate in discovery.posts])
-        candidates_to_fetch = [
+        candidates_to_extract = [
             candidate for candidate in discovery.posts
             if not _is_confirmed(existing_rows.get(candidate.post_id), candidate.post_id)
         ]
-        fetched = await fetch_post_pages(db, candidates_to_fetch)
         extractions = [
-            fetched.get(candidate.post_id)
-            or PostExtraction(
-                post_id=candidate.post_id,
-                username=candidate.username,
-                permalink=candidate.permalink,
-                text=None,
-                status=ExtractionStatus.INCOMPLETE,
-                source=POST_DOM_SOURCE,
-                parser_version=PARSER_VERSION,
-                reason="post_page_extraction_result_missing",
-            )
-            for candidate in candidates_to_fetch
+            _search_extraction(candidate, discovery.extractions.get(candidate.post_id))
+            for candidate in candidates_to_extract
         ]
+        candidates_by_id = {candidate.post_id: candidate for candidate in discovery.posts}
+        for candidate in discovery.posts:
+            post = existing_rows.get(candidate.post_id)
+            if post is not None:
+                _apply_search_engagement(post, candidate)
     else:
         raise ThreadsCollectionError("Unknown Threads collection method")
 
@@ -176,6 +172,8 @@ async def collect_keyword(
             continue
 
         post = _new_post(extraction, keyword.id)
+        if method == "web":
+            _apply_search_engagement(post, candidates_by_id[extraction.post_id])
         try:
             async with db.begin_nested():
                 db.add(post)
@@ -231,6 +229,28 @@ def _is_confirmed(post: Post | None, expected_post_id: str) -> bool:
     )
 
 
+def _search_extraction(candidate: DiscoveredPost, extraction: PostExtraction | None) -> PostExtraction:
+    """Reject a search result unless its extraction belongs to this exact card."""
+    if extraction is not None and (
+        extraction.post_id == candidate.post_id
+        and extraction.username.casefold() == candidate.username.casefold()
+        and extraction.permalink == candidate.permalink
+        and extraction.source == SEARCH_DOM_SOURCE
+        and extraction.parser_version == SEARCH_PARSER_VERSION
+    ):
+        return extraction
+    return PostExtraction(
+        post_id=candidate.post_id,
+        username=candidate.username,
+        permalink=candidate.permalink,
+        text=None,
+        status=ExtractionStatus.INCOMPLETE if extraction is None else ExtractionStatus.UNKNOWN_STRUCTURE,
+        source=SEARCH_DOM_SOURCE,
+        parser_version=SEARCH_PARSER_VERSION,
+        reason="search_card_extraction_result_missing" if extraction is None else "search_card_extraction_identity_mismatch",
+    )
+
+
 def _new_post(extraction: PostExtraction, keyword_id: int) -> Post:
     return Post(
         threads_post_id=extraction.post_id,
@@ -243,6 +263,29 @@ def _new_post(extraction: PostExtraction, keyword_id: int) -> Post:
         matched_keyword_id=keyword_id,
         raw_data={"source": extraction.source, "extraction": extraction.diagnostic()},
     )
+
+
+def _apply_search_engagement(post: Post, candidate: DiscoveredPost) -> None:
+    """Update only counts observed on the search card, keeping prior known values."""
+    if candidate.likes_count is not None:
+        post.likes_count = candidate.likes_count
+    if candidate.replies_count is not None:
+        post.replies_count = candidate.replies_count
+
+    raw_data = post.raw_data if isinstance(post.raw_data, dict) else {}
+    previous = sanitized_search_engagement(raw_data)
+    if previous is None and all(
+        count is None for count in (candidate.likes_count, candidate.replies_count, candidate.reposts_count)
+    ):
+        return
+    previous = previous or {"reposts_count": 0, "likes_count": None, "replies_count": None}
+    raw_data = dict(raw_data)
+    raw_data["search_engagement"] = {
+        "reposts_count": candidate.reposts_count if candidate.reposts_count is not None else previous["reposts_count"],
+        "likes_count": candidate.likes_count if candidate.likes_count is not None else previous["likes_count"],
+        "replies_count": candidate.replies_count if candidate.replies_count is not None else previous["replies_count"],
+    }
+    post.raw_data = raw_data
 
 
 def _apply_confirmed_extraction(post: Post, extraction: PostExtraction) -> None:

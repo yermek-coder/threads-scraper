@@ -1,4 +1,4 @@
-"""Discover Threads permalinks, then extract each post from its own page."""
+"""Capture search cards while scrolling; retain direct-page recovery helpers."""
 
 from __future__ import annotations
 
@@ -22,16 +22,19 @@ from app.services.threads_post_parser import (
     PostExtraction,
     POST_DOM_SOURCE,
     PARSER_VERSION,
+    SEARCH_DOM_SOURCE,
+    SEARCH_PARSER_VERSION,
     parse_post_card_html,
 )
 
 logger = logging.getLogger(__name__)
 _SESSION_KEY = "threads_web_storage_state"
 _SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default&filter=recent"
-_MAX_SEARCH_SCROLL_ROUNDS = 16
+_MAX_SEARCH_SCROLL_ROUNDS = 60
 _MAX_DISCOVERED_POSTS = 250
 _MAX_POST_FETCHES_PER_RUN = 100
 _SEARCH_CHANGE_TIMEOUT_MS = 1_800
+_SEARCH_INTERIOR_CHANGE_TIMEOUT_MS = 250
 _POST_READY_TIMEOUT_MS = 18_000
 _POST_FETCH_ATTEMPTS = 2
 _browser_lock = asyncio.Lock()
@@ -42,40 +45,130 @@ _browser_instance: Any = None
 @dataclass(slots=True)
 class DiscoveryResult:
     posts: list[DiscoveredPost]
+    extractions: dict[str, PostExtraction]
     complete: bool
     rounds: int
     reason: str | None = None
 
 
 _SEARCH_COLUMN_READY_SCRIPT = r"""() =>
-  location.pathname === '/search' && document.querySelector('[aria-label="Column body"]') !== null
+  /^\/search\/?$/.test(location.pathname) && document.querySelector('[aria-label="Column body"]') !== null
 """
 
 _SEARCH_DISCOVERY_SCRIPT = r"""() => {
   const column = document.querySelector('[aria-label="Column body"]');
   if (!column) return { structure: false, posts: [] };
   const posts = [];
-  const seen = new Set();
+  const signals = [];
   const supportedHosts = new Set(['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net']);
-  for (const anchor of column.querySelectorAll('a[href]')) {
-    let url;
-    let parts;
+  const cardSelector = '[data-pressable-container="true"],article,[role="article"]';
+  const ownTime = (card) => Array.from(card.querySelectorAll('time[datetime]'))
+    .find((node) => node.closest(cardSelector) === card);
+  const identity = (href) => {
     try {
-      url = new URL(anchor.href, location.href);
-      parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
-    } catch { continue; }
-    if (!supportedHosts.has(url.hostname.toLowerCase())
-        || parts.length !== 3 || !parts[0].startsWith('@') || parts[1] !== 'post' || !parts[2]) continue;
-    const username = parts[0].slice(1);
-    const id = parts[2];
-    const key = `${username.toLowerCase()}/${id}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    // Discovery carries identity only. The post body is read only after opening
-    // this exact permalink and independently validating its route and author.
-    posts.push({ id, username, permalink: `${url.origin}${url.pathname}` });
+      const url = new URL(href, location.href);
+      const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+      if (!supportedHosts.has(url.hostname.toLowerCase()) || parts.length !== 3
+          || !parts[0].startsWith('@') || parts[1] !== 'post' || !parts[2]) return null;
+      return { id: parts[2], username: parts[0].slice(1), permalink: `${url.origin}${url.pathname}` };
+    } catch { return null; }
+  };
+  const readCount = (value) => {
+    const text = String(value || '').replace(/\u00a0/g, ' ').trim();
+    if (!text) return null;
+    const abbreviated = text.match(/^([\d.,]+)\s*(K|M|B|тыс\.?|млн\.?|млрд\.?)$/i);
+    if (abbreviated) {
+      const amount = Number(abbreviated[1].replace(',', '.'));
+      const suffix = abbreviated[2].toLowerCase();
+      const factor = suffix.startsWith('k') || suffix.startsWith('тыс') ? 1_000
+        : suffix.startsWith('m') || suffix.startsWith('млн') ? 1_000_000 : 1_000_000_000;
+      return Number.isFinite(amount) ? Math.round(amount * factor) : null;
+    }
+    return /^[\d\s,.]+$/.test(text) ? Number(text.replace(/[\s,.]/g, '')) : null;
+  };
+  const cards = Array.from(column.querySelectorAll(cardSelector)).filter((card) => {
+    if (!ownTime(card)) return false;
+    for (let parent = card.parentElement?.closest(cardSelector);
+         parent && column.contains(parent);
+         parent = parent.parentElement?.closest(cardSelector)) {
+      if (ownTime(parent)) return false;
+    }
+    return true;
+  });
+  for (const card of cards) {
+    const time = ownTime(card);
+    const postAnchor = time?.closest('a[href]');
+    const post = postAnchor ? identity(postAnchor.href) : null;
+    if (!post) continue;
+    const hasAuthor = Array.from(card.querySelectorAll('a[href]')).some((anchor) => {
+      if (anchor.closest(cardSelector) !== card) return false;
+      try {
+        const url = new URL(anchor.href, location.href);
+        const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+        return supportedHosts.has(url.hostname.toLowerCase()) && parts.length === 1
+          && parts[0].toLowerCase() === `@${post.username.toLowerCase()}`;
+      } catch { return false; }
+    });
+    if (!hasAuthor) continue;
+
+    // Copy the card before Threads virtualizes it away. The post-card
+    // parser checks the permalink/author/header/body relationship on this
+    // bounded card; search results never supply trusted body text by position.
+    const clone = card.cloneNode(true);
+    const originalRegions = Array.from(card.querySelectorAll('[dir="auto"]'));
+    const clonedRegions = Array.from(clone.querySelectorAll('[dir="auto"]'));
+    const regionContainsExcludedContent = (region) => {
+      if (region.querySelector(cardSelector)) return true;
+      for (const anchor of region.querySelectorAll('a[href]')) {
+        try {
+          const url = new URL(anchor.href, location.href);
+          if (!supportedHosts.has(url.hostname.toLowerCase()) && anchor.querySelector('img,video,iframe')) return true;
+        } catch {}
+      }
+      return false;
+    };
+    for (let i = 0; i < originalRegions.length; i += 1) {
+      const region = originalRegions[i];
+      if (!region.querySelector('[dir="auto"],button,[role="button"],time')
+          && !regionContainsExcludedContent(region))
+        clonedRegions[i].setAttribute('data-threads-inner-text', region.innerText || '');
+    }
+    const originalMedia = Array.from(card.querySelectorAll('img,video,iframe'));
+    const clonedMedia = Array.from(clone.querySelectorAll('img,video,iframe'));
+    for (let i = 0; i < originalMedia.length; i += 1) {
+      const media = originalMedia[i];
+      const ready = media instanceof HTMLImageElement ? media.complete && media.naturalWidth > 0
+        : media instanceof HTMLVideoElement ? media.readyState >= 1 || Boolean(media.poster)
+        : media instanceof HTMLIFrameElement && media.contentDocument?.readyState === 'complete';
+      clonedMedia[i].setAttribute('data-threads-media-ready', ready ? 'true' : 'false');
+    }
+    for (const control of card.querySelectorAll('button,[role="button"]')) {
+      if (control.closest(cardSelector) !== card) continue;
+      const labels = [
+        control.querySelector('svg title')?.textContent,
+        control.querySelector('svg[aria-label]')?.getAttribute('aria-label'),
+        control.getAttribute('aria-label')
+      ].filter(Boolean).map((label) => label.trim().toLowerCase());
+      const key = labels.map((label) =>
+        /^(like|unlike|нравится|не нравится)(?:[\s,:]|$)/i.test(label) ? 'likes_count'
+          : /^(comment|reply|комментировать|комментарии|ответить|ответы)(?:[\s,:]|$)/i.test(label) ? 'replies_count'
+          : /^(repost|репост|репостнуть|сделать репост)(?:[\s,:]|$)/i.test(label) ? 'reposts_count'
+          : null
+      ).find(Boolean);
+      if (!key) continue;
+      const value = readCount(control.innerText);
+      if (Number.isSafeInteger(value) && value >= 0) post[key] = value;
+    }
+    post.html = clone.outerHTML;
+    post.timestamp = time.getAttribute('datetime');
+    post.is_loading = Boolean(card.querySelector('[aria-busy="true"],[role="progressbar"]'));
+    post.is_truncated = Array.from(card.querySelectorAll('button,[role="button"]')).some((control) =>
+      control.closest(cardSelector) === card
+      && /^(?:(?:\.\.\.|…)\s*)?(see more|show more|read more|more|ещ[её]|показать ещ[её]|читать дальше|подробнее)$/i.test(control.innerText.trim()));
+    posts.push(post);
+    signals.push(`${postAnchor.getAttribute('href')}:${card.outerHTML.length}`);
   }
-  const signature = posts.map((post) => `${post.username.toLowerCase()}/${post.id}`).join('|');
+  const signature = signals.join('|');
   const scroller = column.scrollHeight > column.clientHeight + 1 ? column : document.scrollingElement;
   return {
     structure: true,
@@ -91,18 +184,24 @@ _SEARCH_DISCOVERY_SCRIPT = r"""() => {
 _SEARCH_STATE_CHANGED_SCRIPT = r"""(previous) => {
   const column = document.querySelector('[aria-label="Column body"]');
   if (!column) return true;
-  const posts = [];
-  for (const anchor of column.querySelectorAll('a[href]')) {
-    try {
-      const url = new URL(anchor.href, location.href);
-      const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
-      if (['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net'].includes(url.hostname.toLowerCase())
-          && parts.length === 3 && parts[0].startsWith('@') && parts[1] === 'post' && parts[2]) {
-        posts.push(`${parts[0].toLowerCase()}/${parts[2]}`);
+  const cardSelector = '[data-pressable-container="true"],article,[role="article"]';
+  const ownTime = (card) => Array.from(card.querySelectorAll('time[datetime]'))
+    .find((node) => node.closest(cardSelector) === card);
+  const signature = Array.from(column.querySelectorAll(cardSelector))
+    .filter((card) => {
+      if (!ownTime(card)) return false;
+      for (let parent = card.parentElement?.closest(cardSelector);
+           parent && column.contains(parent);
+           parent = parent.parentElement?.closest(cardSelector)) {
+        if (ownTime(parent)) return false;
       }
-    } catch {}
-  }
-  const signature = posts.join('|');
+      return true;
+    })
+    .map((card) => {
+      const time = ownTime(card);
+      const link = time?.closest('a[href]');
+      return link ? `${link.getAttribute('href')}:${card.outerHTML.length}` : '';
+    }).filter(Boolean).join('|');
   const isLoading = Boolean(column.querySelector('[aria-busy="true"],[role="progressbar"]'));
   const scroller = column.scrollHeight > column.clientHeight + 1 ? column : document.scrollingElement;
   const height = scroller?.scrollHeight || document.documentElement.scrollHeight;
@@ -309,8 +408,86 @@ async def _raise_for_auth_or_challenge(page: Any) -> None:
         raise ThreadsCollectionError("Threads requested an account verification step. Refresh the browser session.")
 
 
+def _merge_search_cards(
+    found: dict[str, DiscoveredPost],
+    extractions: dict[str, PostExtraction],
+    state: dict[str, Any],
+) -> int:
+    """Keep each card's identity-checked text before search virtualization removes it."""
+    items = state.get("posts")
+    new_count = merge_discovery_batch(found, items)
+    assert isinstance(items, list)
+    for item in items:
+        candidate = found[item["id"]]
+        html = item.get("html")
+        if not isinstance(html, str) or not html:
+            parsed = _search_failed_result(
+                candidate,
+                ExtractionStatus.INCOMPLETE,
+                "search_card_html_missing",
+                timestamp=item.get("timestamp") if isinstance(item.get("timestamp"), str) else None,
+            )
+        else:
+            parsed = parse_post_card_html(
+                html,
+                expected_post_id=candidate.post_id,
+                expected_username=candidate.username,
+                permalink=candidate.permalink,
+                timestamp=item.get("timestamp") if isinstance(item.get("timestamp"), str) else None,
+            )
+            parsed.source = SEARCH_DOM_SOURCE
+            parsed.parser_version = SEARCH_PARSER_VERSION
+            if item.get("is_truncated") and parsed.status == ExtractionStatus.SUCCESS:
+                parsed = _search_failed_result(
+                    candidate, ExtractionStatus.INCOMPLETE, "search_card_text_truncated", timestamp=parsed.timestamp
+                )
+            elif item.get("is_loading") and not parsed.confirmed:
+                parsed = _search_failed_result(
+                    candidate, ExtractionStatus.INCOMPLETE, "search_card_content_still_loading", timestamp=parsed.timestamp
+                )
+        parsed.likes_count = candidate.likes_count or 0
+        parsed.replies_count = candidate.replies_count or 0
+        previous = extractions.get(candidate.post_id)
+        priority = {
+            ExtractionStatus.SUCCESS: 3,
+            ExtractionStatus.NO_TEXT: 2,
+            ExtractionStatus.INCOMPLETE: 1,
+            ExtractionStatus.UNKNOWN_STRUCTURE: 1,
+            ExtractionStatus.UNAVAILABLE: 0,
+        }
+        if previous is None or (
+            (priority.get(parsed.status, 0), len(parsed.text or ""))
+            > (priority.get(previous.status, 0), len(previous.text or ""))
+        ):
+            extractions[candidate.post_id] = parsed
+        elif previous is not None:
+            previous.likes_count = candidate.likes_count or 0
+            previous.replies_count = candidate.replies_count or 0
+    return new_count
+
+
+def _search_failed_result(
+    candidate: DiscoveredPost,
+    status: ExtractionStatus,
+    reason: str,
+    *,
+    timestamp: str | None = None,
+) -> PostExtraction:
+    return PostExtraction(
+        post_id=candidate.post_id,
+        username=candidate.username,
+        permalink=candidate.permalink,
+        text=None,
+        status=status,
+        source=SEARCH_DOM_SOURCE,
+        parser_version=SEARCH_PARSER_VERSION,
+        reason=reason,
+        timestamp=timestamp,
+    )
+
+
 async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResult:
-    """Discover post identities on search, without reading result-card text."""
+    """Capture and parse identity-matched search cards as the feed scrolls."""
     try:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
     except ImportError as exc:
@@ -335,18 +512,19 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
                 logger.error(
                     "Threads extraction diagnostic post_id=* source=%s parser_version=%s status=%s reason=%s",
                     "threads_search_dom",
-                    "threads-search-discovery-v2",
+                    SEARCH_PARSER_VERSION,
                     ExtractionStatus.UNKNOWN_STRUCTURE.value,
                     "search_column_not_found",
                 )
                 raise ThreadsCollectionError("Threads search structure changed: results column was not found") from exc
 
             found: dict[str, DiscoveredPost] = {}
+            extractions: dict[str, PostExtraction] = {}
             state = await page.evaluate(_SEARCH_DISCOVERY_SCRIPT)
             if not isinstance(state, dict) or not state.get("structure"):
                 raise ThreadsCollectionError("Threads search structure changed: results column is unreadable")
             try:
-                merge_discovery_batch(found, state.get("posts"))
+                _merge_search_cards(found, extractions, state)
             except ValueError as exc:
                 raise ThreadsCollectionError(f"Threads search structure changed: {exc}") from exc
             rounds = 0
@@ -362,15 +540,23 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
                 before_signature = str(state.get("signature", ""))
                 before_height = int(state.get("scrollHeight", 0))
                 before_loading = bool(state.get("is_loading"))
-                await page.evaluate(
+                scroll_step = await page.evaluate(
                     """() => {
                       const column = document.querySelector('[aria-label="Column body"]');
                       const scroller = column && column.scrollHeight > column.clientHeight + 1
                         ? column
                         : document.scrollingElement;
-                      if (scroller) scroller.scrollTop = scroller.scrollHeight;
-                      else window.scrollTo(0, document.documentElement.scrollHeight);
+                      const step = Math.max(500, Math.floor(Math.min(scroller?.clientHeight || window.innerHeight, window.innerHeight) * 0.8));
+                      if (scroller) scroller.scrollTop += step;
+                      else window.scrollBy(0, step);
+                      return step;
                     }"""
+                )
+                near_end = (
+                    int(state.get("scrollTop", 0))
+                    + int(state.get("clientHeight", 0))
+                    + int(scroll_step or 0)
+                    >= before_height - 50
                 )
                 try:
                     await page.wait_for_function(
@@ -380,7 +566,7 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
                             "scrollHeight": before_height,
                             "isLoading": before_loading,
                         },
-                        timeout=_SEARCH_CHANGE_TIMEOUT_MS,
+                        timeout=_SEARCH_CHANGE_TIMEOUT_MS if near_end else _SEARCH_INTERIOR_CHANGE_TIMEOUT_MS,
                     )
                 except PlaywrightTimeoutError:
                     pass
@@ -389,7 +575,7 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
                     raise ThreadsCollectionError("Threads search structure changed while paginating results")
                 before_count = len(found)
                 try:
-                    merge_discovery_batch(found, next_state.get("posts"))
+                    _merge_search_cards(found, extractions, next_state)
                 except ValueError as exc:
                     raise ThreadsCollectionError(f"Threads search structure changed while paginating: {exc}") from exc
                 new_unique_ids = len(found) - before_count
@@ -401,11 +587,15 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
                     next_height=int(next_state.get("scrollHeight", 0)),
                     new_unique_ids=new_unique_ids,
                 )
-                if state_is_stable and next_state.get("is_loading"):
+                at_end = (
+                    int(next_state.get("scrollTop", 0)) + int(next_state.get("clientHeight", 0))
+                    >= int(next_state.get("scrollHeight", 0)) - 50
+                )
+                if state_is_stable and at_end and next_state.get("is_loading"):
                     loading_stalled_rounds += 1
                 else:
                     loading_stalled_rounds = 0
-                if state_is_stable and not next_state.get("is_loading"):
+                if state_is_stable and at_end and not next_state.get("is_loading"):
                     stable_rounds += 1
                 else:
                     stable_rounds = 0
@@ -420,7 +610,7 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
                 logger.error(
                     "Threads extraction diagnostic post_id=* source=%s parser_version=%s status=%s reason=%s",
                     "threads_search_dom",
-                    "threads-search-discovery-v2",
+                    SEARCH_PARSER_VERSION,
                     ExtractionStatus.UNKNOWN_STRUCTURE.value,
                     "search_page_has_no_canonical_post_permalink",
                 )
@@ -431,6 +621,7 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
             complete = False
             return DiscoveryResult(
                 posts=list(found.values()),
+                extractions=extractions,
                 complete=complete,
                 rounds=rounds,
                 reason="maximum_discovered_post_limit_reached"
@@ -635,13 +826,11 @@ async def fetch_post_pages(db: AsyncSession, candidates: list[DiscoveredPost]) -
 
 
 async def search_keyword_web(db: AsyncSession, phrase: str) -> tuple[list[PostExtraction], bool, str | None]:
-    """Compatibility facade that fetches each discovered post by its permalink."""
+    """Compatibility facade for callers that need parsed search results."""
     discovery = await discover_keyword_posts(db, phrase)
-    fetched = await fetch_post_pages(db, discovery.posts)
     extractions = [
-        fetched[candidate.post_id]
-        if candidate.post_id in fetched
-        else _failed_result(candidate, ExtractionStatus.INCOMPLETE, "post_fetch_result_missing")
+        discovery.extractions.get(candidate.post_id)
+        or _search_failed_result(candidate, ExtractionStatus.INCOMPLETE, "search_card_extraction_result_missing")
         for candidate in discovery.posts
     ]
     return extractions, discovery.complete, discovery.reason
