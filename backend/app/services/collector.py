@@ -1,14 +1,17 @@
 """Keyword polling and persistence for discovered Threads posts."""
 
 import logging
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import SessionFactory
+from app.core.observability import log_event
 from app.models import Keyword, Post
 from app.services.filter_service import recalculate_post_filter_state
 from app.services.notifier import send_posts
@@ -83,7 +86,66 @@ async def collect_keyword(
     notification_batch: list[int] | None = None,
 ) -> dict[str, int | bool | str | None]:
     """Fetch, filter, de-duplicate, and persist one keyword's latest results."""
-    method = await get_setting(db, "threads_collection_method") or "web"
+    run_id = uuid.uuid4().hex
+    started = time.perf_counter()
+    method = "unknown"
+    log_fields = {
+        "run_id": run_id,
+        "keyword_id": keyword.id,
+        "keyword": keyword.phrase,
+        "notify": notify,
+    }
+    try:
+        method = str(await get_setting(db, "threads_collection_method") or "web")
+        log_event(
+            logger,
+            logging.INFO,
+            "threads.collection_started",
+            **log_fields,
+            method=method,
+        )
+        result = await _collect_keyword_run(
+            db,
+            keyword,
+            method=method,
+            run_id=run_id,
+            notify=notify,
+            notification_batch=notification_batch,
+        )
+    except Exception as error:
+        log_event(
+            logger,
+            logging.ERROR,
+            "threads.collection_failed",
+            **log_fields,
+            method=method,
+            exception_type=type(error).__name__,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            exc_info=not isinstance(error, SQLAlchemyError),
+        )
+        raise
+    log_event(
+        logger,
+        logging.INFO,
+        "threads.collection_finished",
+        **log_fields,
+        method=method,
+        duration_ms=round((time.perf_counter() - started) * 1000),
+        **result,
+    )
+    return result
+
+
+async def _collect_keyword_run(
+    db: AsyncSession,
+    keyword: Keyword,
+    *,
+    method: str,
+    run_id: str,
+    notify: bool,
+    notification_batch: list[int] | None,
+) -> dict[str, int | bool | str | None]:
+    """Run collection after the public wrapper establishes a log correlation ID."""
     if method == "api":
         api_records = await search_keyword(db, keyword.phrase)
         extractions = [parse_api_post(item) for item in api_records]
@@ -96,12 +158,19 @@ async def collect_keyword(
         discovery_complete = discovery.complete
         discovery_reason = discovery.reason
         if not discovery.complete:
-            logger.warning(
-                "Threads discovery diagnostic source=threads_search_dom parser_version=%s status=%s reason=%s rounds=%s",
-                SEARCH_PARSER_VERSION,
-                ExtractionStatus.INCOMPLETE.value,
-                discovery.reason,
-                discovery.rounds,
+            log_event(
+                logger,
+                logging.WARNING,
+                "threads.discovery_incomplete",
+                run_id=run_id,
+                keyword_id=keyword.id,
+                keyword=keyword.phrase,
+                source="threads_search_dom",
+                parser_version=SEARCH_PARSER_VERSION,
+                status=ExtractionStatus.INCOMPLETE.value,
+                reason=discovery.reason,
+                rounds=discovery.rounds,
+                discovered=len(discovery.posts),
             )
         existing_rows = await _load_existing_posts(db, [candidate.post_id for candidate in discovery.posts])
         candidates_to_extract = [
@@ -133,12 +202,18 @@ async def collect_keyword(
     for extraction in extractions:
         if not extraction.post_id:
             extraction_failures += 1
-            logger.error(
-                "Threads extraction diagnostic post_id=* source=%s parser_version=%s status=%s reason=%s",
-                extraction.source,
-                extraction.parser_version,
-                extraction.status.value,
-                extraction.reason,
+            log_event(
+                logger,
+                logging.ERROR,
+                "threads.extraction_failed",
+                run_id=run_id,
+                keyword_id=keyword.id,
+                keyword=keyword.phrase,
+                post_id=None,
+                source=extraction.source,
+                parser_version=extraction.parser_version,
+                status=extraction.status.value,
+                reason=extraction.reason,
             )
             continue
 
@@ -169,6 +244,21 @@ async def collect_keyword(
                 else:
                     _apply_unconfirmed_extraction(post, extraction)
                 extraction_failures += 1
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "threads.extraction_failed",
+                    run_id=run_id,
+                    keyword_id=keyword.id,
+                    keyword=keyword.phrase,
+                    post_pk=post.id,
+                    post_id=extraction.post_id,
+                    source=extraction.source,
+                    parser_version=extraction.parser_version,
+                    status=extraction.status.value,
+                    reason=extraction.reason,
+                    previous_result_preserved=was_confirmed,
+                )
             continue
 
         post = _new_post(extraction, keyword.id)
@@ -187,9 +277,24 @@ async def collect_keyword(
             affected_post_ids.add(post.id)
         elif not extraction.confirmed:
             extraction_failures += 1
+            log_event(
+                logger,
+                logging.WARNING,
+                "threads.extraction_failed",
+                run_id=run_id,
+                keyword_id=keyword.id,
+                keyword=keyword.phrase,
+                post_pk=post.id,
+                post_id=extraction.post_id,
+                source=extraction.source,
+                parser_version=extraction.parser_version,
+                status=extraction.status.value,
+                reason=extraction.reason,
+                persisted=True,
+            )
 
     if affected_post_ids:
-        await recalculate_post_filter_state(db, affected_post_ids)
+        await recalculate_post_filter_state(db, affected_post_ids, run_id=run_id)
 
     keyword.last_polled_at = datetime.now(timezone.utc)
     await db.commit()

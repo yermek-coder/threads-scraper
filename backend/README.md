@@ -62,3 +62,17 @@ PYTHONPATH=backend python -m unittest discover -s backend/tests -v
 ## Jev relevance filter
 
 The final relevance check can use Jev through OpenRouter. Save an OpenRouter API key in **Settings → Threads → Фильтр релевантности Jev** (or set `OPENROUTER_API_KEY` in the backend environment), enable the filter, and edit its instruction there. Jev checks each non-duplicate post against the keyword that found it. If OpenRouter is unavailable, collection keeps the existing deterministic relevance result.
+
+Collection and relevance events are written to the backend container log as one-line JSON payloads after a stable event name. `run_id` correlates a keyword collection with its discovery, extraction, stop-word, duplicate, and Jev events. Jev records the model, prompt fingerprint, probability, threshold, final decision, latency, OpenRouter request/response IDs, usage, HTTP failures, and the fallback decision. Post text and API keys are not logged.
+
+Follow production backend logs from the repository directory with:
+
+```sh
+docker compose -p threads-scraper -f docker-compose.yml -f deploy/oracle/docker-compose.yml logs -f backend
+```
+
+Filter to collection and relevance diagnostics with:
+
+```sh
+docker compose -p threads-scraper -f docker-compose.yml -f deploy/oracle/docker-compose.yml logs -f backend 2>&1 | grep -E 'threads\.collection_|threads\.discovery_|threads\.extraction_|jev\.|relevance\.'
+```
