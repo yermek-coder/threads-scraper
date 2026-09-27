@@ -69,6 +69,7 @@ function PostActionsMenu({ post, busy, onDelete }: { post: Post; busy: boolean; 
 
 function PostCard({
   post,
+  matchedKeyword,
   selected,
   onSelect,
   onStatus,
@@ -76,6 +77,7 @@ function PostCard({
   busy = false,
 }: {
   post: Post;
+  matchedKeyword: string | null;
   selected: boolean;
   onSelect: (post: Post, selected: boolean) => void;
   onStatus: (post: Post, patch: { is_read?: boolean; is_relevant?: boolean }) => void;
@@ -136,7 +138,7 @@ function PostCard({
                 {post.extraction_last_attempt_reason ? ` · ${post.extraction_last_attempt_reason}` : ''}
               </Badge>
             )}
-            {post.matched_keyword && <Badge tone="blue"><span className="mr-1 opacity-70">Ключ:</span>{post.matched_keyword}</Badge>}
+            {matchedKeyword && <Badge tone="blue"><span className="mr-1 opacity-70">Запрос:</span>{matchedKeyword}</Badge>}
             {!post.is_relevant && <Badge tone="amber">Нерелевантный</Badge>}
             {post.is_duplicate && <Badge tone="neutral">Дубликат{post.duplicate_of_id ? ` · #${post.duplicate_of_id}` : ''}</Badge>}
           </div>
@@ -476,6 +478,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
               <PostCard
                 key={post.id}
                 post={post}
+                matchedKeyword={post.matched_keyword || keywords.find((keyword) => keyword.id === post.matched_keyword_id)?.phrase || null}
                 selected={selectedPostIds.includes(post.id)}
                 onSelect={(item, selected) => setSelectedPostIds((current) => selected ? [...new Set([...current, item.id])] : current.filter((id) => id !== item.id))}
                 busy={busyPostIds.includes(post.id) || bulkAction !== null}
