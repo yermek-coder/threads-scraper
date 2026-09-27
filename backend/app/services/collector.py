@@ -337,9 +337,6 @@ async def poll_active_keywords() -> None:
         if collection_method == "api" and not await get_setting(db, "threads_access_token"):
             logger.info("Scheduled Threads collection skipped: access token is not configured")
             return
-        if collection_method == "web" and not isinstance(await get_setting(db, "threads_web_storage_state"), dict):
-            logger.info("Scheduled Threads collection skipped: web session is not configured")
-            return
         keyword_ids = list((await db.scalars(select(Keyword.id).where(Keyword.is_active.is_(True)))).all())
         notification_batch: list[int] = []
         for keyword_id in keyword_ids:

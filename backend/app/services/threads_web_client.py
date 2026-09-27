@@ -29,7 +29,7 @@ from app.services.threads_post_parser import (
 
 logger = logging.getLogger(__name__)
 _SESSION_KEY = "threads_web_storage_state"
-_SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default&filter=recent"
+_SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default"
 _MAX_SEARCH_SCROLL_ROUNDS = 60
 _MAX_DISCOVERED_POSTS = 250
 _MAX_POST_FETCHES_PER_RUN = 100
@@ -51,12 +51,18 @@ class DiscoveryResult:
     reason: str | None = None
 
 
-_SEARCH_COLUMN_READY_SCRIPT = r"""() =>
-  /^\/search\/?$/.test(location.pathname) && document.querySelector('[aria-label="Column body"]') !== null
-"""
+_SEARCH_COLUMN_READY_SCRIPT = r"""() => {
+  const p = location.pathname;
+  if (!p.startsWith('/search')) return false;
+  if (document.querySelector('[data-pressable-container="true"],article,[role="article"]')) return true;
+  const text = document.body ? document.body.innerText : '';
+  if (/No results|Ничего не найдено/i.test(text)) return true;
+  if (document.querySelector('[aria-label="Column body"], [aria-label="Содержимое столбца"], main')) return true;
+  return false;
+}"""
 
 _SEARCH_DISCOVERY_SCRIPT = r"""() => {
-  const column = document.querySelector('[aria-label="Column body"]');
+  const column = document.querySelector('[aria-label="Column body"], [aria-label="Содержимое столбца"], main') || document.body;
   if (!column) return { structure: false, posts: [] };
   const posts = [];
   const signals = [];
@@ -97,6 +103,10 @@ _SEARCH_DISCOVERY_SCRIPT = r"""() => {
     }
     return true;
   });
+
+  const bodyText = document.body ? document.body.innerText : '';
+  const isNoResults = /No results|Ничего не найдено/i.test(bodyText);
+
   for (const card of cards) {
     const time = ownTime(card);
     const postAnchor = ownPostAnchor(card);
@@ -152,9 +162,9 @@ _SEARCH_DISCOVERY_SCRIPT = r"""() => {
         control.getAttribute('aria-label')
       ].filter(Boolean).map((label) => label.trim().toLowerCase());
       const key = labels.map((label) =>
-        /^(like|unlike|нравится|не нравится)(?:[\s,:]|$)/i.test(label) ? 'likes_count'
-          : /^(comment|reply|комментировать|комментарии|ответить|ответы)(?:[\s,:]|$)/i.test(label) ? 'replies_count'
-          : /^(repost|репост|репостнуть|сделать репост)(?:[\s,:]|$)/i.test(label) ? 'reposts_count'
+        /(like|unlike|нравится|не нравится)/i.test(label) ? 'likes_count'
+          : /(comment|reply|коммент|ответ)/i.test(label) ? 'replies_count'
+          : /(repost|репост)/i.test(label) ? 'reposts_count'
           : null
       ).find(Boolean);
       if (!key) continue;
@@ -174,6 +184,7 @@ _SEARCH_DISCOVERY_SCRIPT = r"""() => {
   const scroller = column.scrollHeight > column.clientHeight + 1 ? column : document.scrollingElement;
   return {
     structure: true,
+    is_no_results: isNoResults && posts.length === 0,
     posts,
     signature,
     is_loading: Boolean(column.querySelector('[aria-busy="true"],[role="progressbar"]')),
@@ -184,7 +195,7 @@ _SEARCH_DISCOVERY_SCRIPT = r"""() => {
 }"""
 
 _SEARCH_STATE_CHANGED_SCRIPT = r"""(previous) => {
-  const column = document.querySelector('[aria-label="Column body"]');
+  const column = document.querySelector('[aria-label="Column body"], [aria-label="Содержимое столбца"], main') || document.body;
   if (!column) return true;
   const cardSelector = '[data-pressable-container="true"],article,[role="article"]';
   const ownPostLink = (card) => Array.from(card.querySelectorAll('a[href*="/post/"]'))
@@ -388,17 +399,43 @@ async def close_threads_web_browser() -> None:
         _playwright_instance = None
 
 
-async def _new_authenticated_context(db: AsyncSession) -> Any:
+async def _new_search_context(db: AsyncSession) -> Any:
     storage_state = await get_setting(db, _SESSION_KEY)
-    if not isinstance(storage_state, dict):
-        raise ThreadsCollectionError("Threads web session is not configured. Import a Playwright storage state first.")
     browser = await _get_browser()
+    if isinstance(storage_state, dict):
+        return await browser.new_context(
+            storage_state=storage_state,
+            viewport={"width": 1440, "height": 1000},
+            locale="ru-RU",
+            timezone_id="Asia/Almaty",
+        )
     return await browser.new_context(
-        storage_state=storage_state,
         viewport={"width": 1440, "height": 1000},
         locale="ru-RU",
         timezone_id="Asia/Almaty",
     )
+
+
+async def _new_anonymous_context() -> Any:
+    browser = await _get_browser()
+    return await browser.new_context(
+        viewport={"width": 1440, "height": 1000},
+        locale="ru-RU",
+        timezone_id="Asia/Almaty",
+    )
+
+
+async def _new_authenticated_context(db: AsyncSession) -> Any:
+    return await _new_search_context(db)
+
+
+async def _dismiss_dialog_if_present(page: Any) -> None:
+    try:
+        close_btn = page.locator('[aria-label="Close"], [aria-label="Закрыть"]').first
+        if await close_btn.count() > 0:
+            await close_btn.click(timeout=1000)
+    except Exception:
+        pass
 
 
 async def _raise_for_auth_or_challenge(page: Any) -> None:
@@ -497,13 +534,32 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
     async with _browser_lock:
         context = None
         try:
-            context = await _new_authenticated_context(db)
+            target_url = _SEARCH_URL.format(query=quote_plus(phrase))
+            context = await _new_search_context(db)
             page = await context.new_page()
             response = await page.goto(
-                _SEARCH_URL.format(query=quote_plus(phrase)),
+                target_url,
                 wait_until="domcontentloaded",
                 timeout=45_000,
             )
+            await _dismiss_dialog_if_present(page)
+
+            pathname = urlparse(page.url).path.rstrip("/")
+            if pathname == "" or not pathname.startswith("/search"):
+                logger.warning(
+                    "Threads search redirected away to %s (session likely expired). Retrying in anonymous mode...",
+                    page.url,
+                )
+                await context.close()
+                context = await _new_anonymous_context()
+                page = await context.new_page()
+                response = await page.goto(
+                    target_url,
+                    wait_until="domcontentloaded",
+                    timeout=45_000,
+                )
+                await _dismiss_dialog_if_present(page)
+
             await _raise_for_auth_or_challenge(page)
             if response is not None and response.status >= 500:
                 raise ThreadsCollectionError("Threads web search returned a server error")
@@ -543,7 +599,7 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
                 before_loading = bool(state.get("is_loading"))
                 scroll_step = await page.evaluate(
                     """() => {
-                      const column = document.querySelector('[aria-label="Column body"]');
+                      const column = document.querySelector('[aria-label="Column body"], [aria-label="Содержимое столбца"], main') || document.body;
                       const scroller = column && column.scrollHeight > column.clientHeight + 1
                         ? column
                         : document.scrollingElement;
@@ -553,6 +609,9 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
                       return step;
                     }"""
                 )
+                await page.mouse.wheel(0, 1500)
+                await _dismiss_dialog_if_present(page)
+
                 near_end = (
                     int(state.get("scrollTop", 0))
                     + int(state.get("clientHeight", 0))
@@ -608,6 +667,14 @@ async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResu
                     break
 
             if not found:
+                if state.get("is_no_results") or not state.get("posts"):
+                    return DiscoveryResult(
+                        posts=[],
+                        extractions={},
+                        complete=True,
+                        rounds=rounds,
+                        reason="no_results_found",
+                    )
                 logger.error(
                     "Threads extraction diagnostic post_id=* source=%s parser_version=%s status=%s reason=%s",
                     "threads_search_dom",
