@@ -1,49 +1,262 @@
-"""Collect public search results from the authenticated Threads web interface."""
+"""Discover Threads permalinks, then extract each post from its own page."""
+
+from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote, urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.settings_service import get_setting
+from app.services.threads_discovery import (
+    DiscoveredPost,
+    merge_discovery_batch,
+    pagination_round_is_stable,
+)
 from app.services.threads_errors import ThreadsCollectionError
+from app.services.threads_post_parser import (
+    ExtractionStatus,
+    PostExtraction,
+    POST_DOM_SOURCE,
+    PARSER_VERSION,
+    parse_post_card_html,
+)
 
 logger = logging.getLogger(__name__)
 _SESSION_KEY = "threads_web_storage_state"
 _SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default&filter=recent"
-_POST_TEXT_READY_SCRIPT = r"""() => {
-  const anchors = Array.from(document.querySelectorAll('a[href*="/post/"]'));
-  return anchors.some((anchor) => {
-    const url = new URL(anchor.href, location.href);
-    const parts = url.pathname.split('/').filter(Boolean);
-    const postIndex = parts.indexOf('post');
-    if (postIndex < 0 || parts.length > postIndex + 2) return false;
-    const postId = parts[postIndex + 1];
-    const username = (parts.find((part) => part.startsWith('@')) || '').slice(1).toLowerCase();
-    const card = anchor.closest('[data-pressable-container="true"]') || anchor.closest('article,[role="article"]');
-    if (!card) return false;
-    return Array.from(card.querySelectorAll('[dir="auto"]')).some((element) => {
-      if (element.closest('button,[role="button"],time')) return false;
-      const text = (element.innerText || '').replace(/\s+/g, ' ').trim();
-      if (!text || text.toLowerCase() === username || text.toLowerCase() === `@${username}` || text.toLowerCase() === 'translate') return false;
-      if (/^\d{1,2}[./]\d{1,2}[./]\d{2,4}$/.test(text)) return false;
-      const link = element.closest('a[href]');
-      if (!link) return true;
-      const linkUrl = new URL(link.href, location.href);
-      const linkParts = linkUrl.pathname.split('/').filter(Boolean);
-      const linkPostIndex = linkParts.indexOf('post');
-      if (linkPostIndex >= 0 && linkParts[linkPostIndex + 1] === postId) return false;
-      if (linkUrl.pathname.startsWith('/@') && !linkUrl.pathname.includes('/post/')) return false;
-      if (linkUrl.pathname === '/search' && linkUrl.searchParams.has('location_id')) return false;
-      return true;
-    });
-  });
-}"""
+_MAX_SEARCH_SCROLL_ROUNDS = 16
+_MAX_DISCOVERED_POSTS = 250
+_MAX_POST_FETCHES_PER_RUN = 100
+_SEARCH_CHANGE_TIMEOUT_MS = 1_800
+_POST_READY_TIMEOUT_MS = 18_000
+_POST_FETCH_ATTEMPTS = 2
 _browser_lock = asyncio.Lock()
 _playwright_instance: Any = None
 _browser_instance: Any = None
+
+
+@dataclass(slots=True)
+class DiscoveryResult:
+    posts: list[DiscoveredPost]
+    complete: bool
+    rounds: int
+    reason: str | None = None
+
+
+_SEARCH_COLUMN_READY_SCRIPT = r"""() =>
+  location.pathname === '/search' && document.querySelector('[aria-label="Column body"]') !== null
+"""
+
+_SEARCH_DISCOVERY_SCRIPT = r"""() => {
+  const column = document.querySelector('[aria-label="Column body"]');
+  if (!column) return { structure: false, posts: [] };
+  const posts = [];
+  const seen = new Set();
+  const supportedHosts = new Set(['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net']);
+  for (const anchor of column.querySelectorAll('a[href]')) {
+    let url;
+    let parts;
+    try {
+      url = new URL(anchor.href, location.href);
+      parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+    } catch { continue; }
+    if (!supportedHosts.has(url.hostname.toLowerCase())
+        || parts.length !== 3 || !parts[0].startsWith('@') || parts[1] !== 'post' || !parts[2]) continue;
+    const username = parts[0].slice(1);
+    const id = parts[2];
+    const key = `${username.toLowerCase()}/${id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // Discovery carries identity only. The post body is read only after opening
+    // this exact permalink and independently validating its route and author.
+    posts.push({ id, username, permalink: `${url.origin}${url.pathname}` });
+  }
+  const signature = posts.map((post) => `${post.username.toLowerCase()}/${post.id}`).join('|');
+  const scroller = column.scrollHeight > column.clientHeight + 1 ? column : document.scrollingElement;
+  return {
+    structure: true,
+    posts,
+    signature,
+    is_loading: Boolean(column.querySelector('[aria-busy="true"],[role="progressbar"]')),
+    scrollHeight: scroller?.scrollHeight || document.documentElement.scrollHeight,
+    scrollTop: scroller?.scrollTop || window.scrollY,
+    clientHeight: scroller?.clientHeight || window.innerHeight
+  };
+}"""
+
+_SEARCH_STATE_CHANGED_SCRIPT = r"""(previous) => {
+  const column = document.querySelector('[aria-label="Column body"]');
+  if (!column) return true;
+  const posts = [];
+  for (const anchor of column.querySelectorAll('a[href]')) {
+    try {
+      const url = new URL(anchor.href, location.href);
+      const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+      if (['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net'].includes(url.hostname.toLowerCase())
+          && parts.length === 3 && parts[0].startsWith('@') && parts[1] === 'post' && parts[2]) {
+        posts.push(`${parts[0].toLowerCase()}/${parts[2]}`);
+      }
+    } catch {}
+  }
+  const signature = posts.join('|');
+  const isLoading = Boolean(column.querySelector('[aria-busy="true"],[role="progressbar"]'));
+  const scroller = column.scrollHeight > column.clientHeight + 1 ? column : document.scrollingElement;
+  const height = scroller?.scrollHeight || document.documentElement.scrollHeight;
+  return signature !== previous.signature || height !== previous.scrollHeight || isLoading !== previous.isLoading;
+}"""
+
+_POST_ROOT_AND_READY_SCRIPT = r"""(expected) => {
+  const normalized = (value) => String(value || '').toLowerCase();
+  const routeParts = location.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+  if (routeParts.length !== 3 || normalized(routeParts[0]) !== `@${expected.username.toLowerCase()}`
+      || routeParts[1] !== 'post' || routeParts[2] !== expected.postId) return false;
+  const samePostLink = (anchor) => {
+    if (!(anchor instanceof HTMLAnchorElement)) return false;
+    try {
+      const url = new URL(anchor.href, location.href);
+      const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+      return ['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net'].includes(url.hostname.toLowerCase())
+        && parts.length === 3 && normalized(parts[0]) === `@${expected.username.toLowerCase()}`
+        && parts[1] === 'post' && parts[2] === expected.postId;
+    } catch { return false; }
+  };
+  const authorLinkMatches = (anchor) => {
+    if (!(anchor instanceof HTMLAnchorElement)) return false;
+    try {
+      const url = new URL(anchor.href, location.href);
+      const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+      return ['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net'].includes(url.hostname.toLowerCase())
+        && parts.length === 1 && normalized(parts[0]) === `@${expected.username.toLowerCase()}`;
+    } catch { return false; }
+  };
+  const postAnchor = Array.from(document.querySelectorAll('a[href]')).find(samePostLink);
+  if (!postAnchor) return false;
+  const card = postAnchor.closest('[data-pressable-container="true"],article,[role="article"]')
+    || document.querySelector('[aria-label="Column body"]');
+  if (!card || !card.contains(postAnchor)) return false;
+  const hasAuthor = Array.from(card.querySelectorAll('a[href]')).some(authorLinkMatches);
+  if (!hasAuthor) return false;
+
+  const header = (() => {
+    const ancestors = new Set();
+    for (let node = postAnchor; node; node = node.parentElement) ancestors.add(node);
+    const author = Array.from(card.querySelectorAll('a[href]')).find(authorLinkMatches);
+    for (let node = author; node; node = node.parentElement) if (ancestors.has(node)) return node;
+    return null;
+  })();
+  if (!header || header === card) return false;
+  const nestedPostCard = (element) => {
+    const boundary = element.closest('[data-pressable-container="true"],article,[role="article"]');
+    return Boolean(boundary && boundary !== card);
+  };
+  const bodyRegions = Array.from(card.querySelectorAll('[dir="auto"]')).filter((element) => {
+    if (element.querySelector('[dir="auto"]') || header.contains(element)) return false;
+    if (element.closest('button,[role="button"],time') || nestedPostCard(element)) return false;
+    return true;
+  });
+  const hasBodyText = bodyRegions.some((element) => (element.innerText || '') !== '');
+  const hasEmptyBodyRegion = bodyRegions.some((element) => (element.innerText || '') === '');
+  const mediaIsReady = (element) => {
+    if (element instanceof HTMLImageElement) return element.complete && element.naturalWidth > 0;
+    if (element instanceof HTMLVideoElement) return element.readyState >= 1 || Boolean(element.poster);
+    if (element instanceof HTMLIFrameElement) return Boolean(element.contentDocument?.readyState === 'complete');
+    return false;
+  };
+  const hasMedia = Array.from(card.querySelectorAll('img,video,iframe')).some((element) => {
+    if (header.contains(element) || nestedPostCard(element)) return false;
+    return mediaIsReady(element);
+  });
+  const hasQuotedPost = Array.from(card.querySelectorAll('a[href]')).some((anchor) => {
+    if (samePostLink(anchor)) return false;
+    try {
+      const url = new URL(anchor.href, location.href);
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (parts.length !== 3 || !parts[0].startsWith('@') || parts[1] !== 'post') return false;
+      const boundary = anchor.closest('[data-pressable-container="true"],article,[role="article"]');
+      return boundary && boundary !== card;
+    } catch { return false; }
+  });
+  return hasBodyText || ((hasMedia || hasQuotedPost) && !hasEmptyBodyRegion);
+}"""
+
+_POST_SNAPSHOT_SCRIPT = r"""(expected) => {
+  const username = expected.username.toLowerCase();
+  const postId = expected.postId;
+  const matchesPost = (anchor) => {
+    try {
+      const url = new URL(anchor.href, location.href);
+      const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+      return ['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net'].includes(url.hostname.toLowerCase())
+        && parts.length === 3 && parts[0].toLowerCase() === `@${username}` && parts[1] === 'post' && parts[2] === postId;
+    } catch { return false; }
+  };
+  const postAnchor = Array.from(document.querySelectorAll('a[href]')).find(matchesPost);
+  if (!postAnchor) return { reason: 'target_permalink_anchor_missing' };
+  const card = postAnchor.closest('[data-pressable-container="true"],article,[role="article"]')
+    || document.querySelector('[aria-label="Column body"]');
+  if (!card) return { reason: 'target_post_container_missing' };
+  const hasAuthor = Array.from(card.querySelectorAll('a[href]')).some((anchor) => {
+    try {
+      const url = new URL(anchor.href, location.href);
+      const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+      return ['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net'].includes(url.hostname.toLowerCase())
+        && parts.length === 1 && parts[0].toLowerCase() === `@${username}`;
+    } catch { return false; }
+  });
+  if (!hasAuthor) return { reason: 'target_author_link_missing' };
+  const time = card.querySelector('time[datetime]');
+  const clone = card.cloneNode(true);
+  const textRegions = (root) => [
+    ...(root.matches?.('[dir="auto"]') ? [root] : []),
+    ...root.querySelectorAll('[dir="auto"]')
+  ];
+  const originalRegions = textRegions(card);
+  const clonedRegions = textRegions(clone);
+  if (originalRegions.length !== clonedRegions.length) return { reason: 'text_region_snapshot_mismatch' };
+  const regionContainsExcludedContent = (region) => {
+    if (region.querySelector('button,[role="button"],time')) return true;
+    for (const anchor of region.querySelectorAll('a[href]')) {
+      try {
+        const url = new URL(anchor.href, location.href);
+        const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+        const isExternalPreview = !['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net'].includes(url.hostname.toLowerCase())
+          && Boolean(anchor.querySelector('img,video,iframe'));
+        if (isExternalPreview) return true;
+        const isDifferentPost = parts.length === 3 && parts[0].startsWith('@') && parts[1] === 'post' && parts[2] !== postId;
+        const boundary = anchor.closest('[data-pressable-container="true"],article,[role="article"]');
+        if (isDifferentPost && boundary && boundary !== card) return true;
+      } catch {}
+    }
+    return false;
+  };
+  for (let index = 0; index < originalRegions.length; index += 1) {
+    if (!regionContainsExcludedContent(originalRegions[index])) {
+      clonedRegions[index].setAttribute('data-threads-inner-text', originalRegions[index].innerText || '');
+    }
+  }
+  const mediaIsReady = (element) => {
+    if (element instanceof HTMLImageElement) return element.complete && element.naturalWidth > 0;
+    if (element instanceof HTMLVideoElement) return element.readyState >= 1 || Boolean(element.poster);
+    if (element instanceof HTMLIFrameElement) return Boolean(element.contentDocument?.readyState === 'complete');
+    return false;
+  };
+  const originalMedia = Array.from(card.querySelectorAll('img,video,iframe'));
+  const clonedMedia = Array.from(clone.querySelectorAll('img,video,iframe'));
+  if (originalMedia.length !== clonedMedia.length) return { reason: 'media_snapshot_mismatch' };
+  for (let index = 0; index < originalMedia.length; index += 1) {
+    clonedMedia[index].setAttribute('data-threads-media-ready', mediaIsReady(originalMedia[index]) ? 'true' : 'false');
+  }
+  return {
+    html: clone.outerHTML,
+    timestamp: time?.getAttribute('datetime') || null,
+    isLoading: Boolean(card.querySelector('[aria-busy="true"],[role="progressbar"]')),
+    hasUnreadyMedia: originalMedia.some((element) => !mediaIsReady(element))
+  };
+}"""
 
 
 async def _get_browser() -> Any:
@@ -75,12 +288,29 @@ async def close_threads_web_browser() -> None:
         _playwright_instance = None
 
 
-async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, Any]]:
-    """Open Threads search in Chromium and extract post cards from the rendered DOM."""
+async def _new_authenticated_context(db: AsyncSession) -> Any:
     storage_state = await get_setting(db, _SESSION_KEY)
     if not isinstance(storage_state, dict):
         raise ThreadsCollectionError("Threads web session is not configured. Import a Playwright storage state first.")
+    browser = await _get_browser()
+    return await browser.new_context(
+        storage_state=storage_state,
+        viewport={"width": 1440, "height": 1000},
+        locale="ru-RU",
+        timezone_id="Asia/Almaty",
+    )
 
+
+async def _raise_for_auth_or_challenge(page: Any) -> None:
+    current_url = page.url.casefold()
+    if "/login" in current_url or "/accounts/login" in current_url:
+        raise ThreadsCollectionError("Threads web session has expired. Import a fresh Playwright storage state.")
+    if "/challenge" in current_url or "/checkpoint" in current_url:
+        raise ThreadsCollectionError("Threads requested an account verification step. Refresh the browser session.")
+
+
+async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResult:
+    """Discover post identities on search, without reading result-card text."""
     try:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
     except ImportError as exc:
@@ -89,178 +319,136 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
     async with _browser_lock:
         context = None
         try:
-            browser = await _get_browser()
-            context = await browser.new_context(
-                storage_state=storage_state,
-                viewport={"width": 1440, "height": 1000},
-                locale="ru-RU",
-                timezone_id="Asia/Almaty",
-            )
+            context = await _new_authenticated_context(db)
             page = await context.new_page()
             response = await page.goto(
                 _SEARCH_URL.format(query=quote_plus(phrase)),
                 wait_until="domcontentloaded",
                 timeout=45_000,
             )
+            await _raise_for_auth_or_challenge(page)
             if response is not None and response.status >= 500:
                 raise ThreadsCollectionError("Threads web search returned a server error")
             try:
-                await page.locator('a[href*="/post/"]').first.wait_for(state="attached", timeout=12_000)
-            except PlaywrightTimeoutError:
-                pass
+                await page.wait_for_function(_SEARCH_COLUMN_READY_SCRIPT, timeout=15_000)
+            except PlaywrightTimeoutError as exc:
+                logger.error(
+                    "Threads extraction diagnostic post_id=* source=%s parser_version=%s status=%s reason=%s",
+                    "threads_search_dom",
+                    "threads-search-discovery-v2",
+                    ExtractionStatus.UNKNOWN_STRUCTURE.value,
+                    "search_column_not_found",
+                )
+                raise ThreadsCollectionError("Threads search structure changed: results column was not found") from exc
 
-            if "/login" in page.url or "/accounts/login" in page.url:
-                raise ThreadsCollectionError("Threads web session has expired. Import a fresh Playwright storage state.")
-            if "/challenge" in page.url or "/checkpoint" in page.url:
-                raise ThreadsCollectionError("Threads requested an account verification step. Refresh the browser session.")
-
-            # Threads inserts permalink/date anchors before the caption. Wait for actual
-            # caption text in a rendered post card, not merely for the first anchor.
+            found: dict[str, DiscoveredPost] = {}
+            state = await page.evaluate(_SEARCH_DISCOVERY_SCRIPT)
+            if not isinstance(state, dict) or not state.get("structure"):
+                raise ThreadsCollectionError("Threads search structure changed: results column is unreadable")
             try:
-                await page.wait_for_function(_POST_TEXT_READY_SCRIPT, timeout=12_000)
-            except PlaywrightTimeoutError:
-                logger.debug("Threads search cards did not expose caption text before timeout")
+                merge_discovery_batch(found, state.get("posts"))
+            except ValueError as exc:
+                raise ThreadsCollectionError(f"Threads search structure changed: {exc}") from exc
+            rounds = 0
+            stable_rounds = 0
+            loading_stalled_rounds = 0
+            loading_stalled = False
+            limit_reached = False
+            while rounds < _MAX_SEARCH_SCROLL_ROUNDS:
+                if len(found) >= _MAX_DISCOVERED_POSTS:
+                    limit_reached = True
+                    break
 
-            for _ in range(4):
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1_200)
+                before_signature = str(state.get("signature", ""))
+                before_height = int(state.get("scrollHeight", 0))
+                before_loading = bool(state.get("is_loading"))
+                await page.evaluate(
+                    """() => {
+                      const column = document.querySelector('[aria-label="Column body"]');
+                      const scroller = column && column.scrollHeight > column.clientHeight + 1
+                        ? column
+                        : document.scrollingElement;
+                      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+                      else window.scrollTo(0, document.documentElement.scrollHeight);
+                    }"""
+                )
+                try:
+                    await page.wait_for_function(
+                        _SEARCH_STATE_CHANGED_SCRIPT,
+                        arg={
+                            "signature": before_signature,
+                            "scrollHeight": before_height,
+                            "isLoading": before_loading,
+                        },
+                        timeout=_SEARCH_CHANGE_TIMEOUT_MS,
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+                next_state = await page.evaluate(_SEARCH_DISCOVERY_SCRIPT)
+                if not isinstance(next_state, dict) or not next_state.get("structure"):
+                    raise ThreadsCollectionError("Threads search structure changed while paginating results")
+                before_count = len(found)
+                try:
+                    merge_discovery_batch(found, next_state.get("posts"))
+                except ValueError as exc:
+                    raise ThreadsCollectionError(f"Threads search structure changed while paginating: {exc}") from exc
+                new_unique_ids = len(found) - before_count
+                rounds += 1
+                state_is_stable = pagination_round_is_stable(
+                    previous_signature=str(state.get("signature", "")),
+                    previous_height=int(state.get("scrollHeight", 0)),
+                    next_signature=str(next_state.get("signature", "")),
+                    next_height=int(next_state.get("scrollHeight", 0)),
+                    new_unique_ids=new_unique_ids,
+                )
+                if state_is_stable and next_state.get("is_loading"):
+                    loading_stalled_rounds += 1
+                else:
+                    loading_stalled_rounds = 0
+                if state_is_stable and not next_state.get("is_loading"):
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
+                state = next_state
+                if stable_rounds >= 2:
+                    break
+                if loading_stalled_rounds >= 3:
+                    loading_stalled = True
+                    break
 
-            records = await page.evaluate(
-                """() => {
-                  const anchors = Array.from(document.querySelectorAll('a[href*="/post/"]'));
-                  const found = new Map();
-                  for (const anchor of anchors) {
-                    const url = new URL(anchor.href, location.href);
-                    const parts = url.pathname.split('/').filter(Boolean);
-                    const postIndex = parts.indexOf('post');
-                    const postId = postIndex >= 0 ? parts[postIndex + 1] : '';
-                    if (!postId || parts.length > postIndex + 2 || found.has(postId)) continue;
-                    const username = (parts.find((part) => part.startsWith('@')) || '').slice(1).toLowerCase();
-                    const isCurrentPostLink = (link) => {
-                      const linkParts = new URL(link.href, location.href).pathname.split('/').filter(Boolean);
-                      const linkPostIndex = linkParts.indexOf('post');
-                      return linkPostIndex >= 0 && linkParts[linkPostIndex + 1] === postId;
-                    };
-                    const monthNames = new Set([
-                      'jan', 'january', 'feb', 'february', 'mar', 'march', 'apr', 'april', 'may', 'jun', 'june',
-                      'jul', 'july', 'aug', 'august', 'sep', 'sept', 'september', 'oct', 'october', 'nov',
-                      'november', 'dec', 'december', 'янв', 'январь', 'января', 'фев', 'февраль', 'февраля',
-                      'мар', 'март', 'марта', 'апр', 'апрель', 'апреля', 'май', 'мая', 'июн', 'июнь', 'июня',
-                      'июл', 'июль', 'июля', 'авг', 'август', 'августа', 'сен', 'сент', 'сентябрь', 'сентября',
-                      'окт', 'октябрь', 'октября', 'ноя', 'нояб', 'ноябрь', 'ноября', 'дек', 'декабрь', 'декабря',
-                      'қаңтар', 'ақпан', 'наурыз', 'сәуір', 'мамыр', 'маусым', 'шілде', 'тамыз', 'қыркүйек',
-                      'қазан', 'қараша', 'желтоқсан'
-                    ]);
-                    const isDateOnly = (value) => {
-                      if (/^(?:\\d{1,2}[./]\\d{1,2}[./]\\d{2,4}|\\d{4}[-./]\\d{1,2}[-./]\\d{1,2})$/.test(value)) return true;
-                      const dateParts = value.toLowerCase().replace(/,/g, '').trim().split(/\\s+/).filter(Boolean);
-                      if (['г', 'года'].includes(dateParts[dateParts.length - 1]?.replace(/\\.$/, ''))) dateParts.pop();
-                      const normalized = dateParts.map((part) => part.replace(/\\.$/, ''));
-                      const isDay = (part) => /^\\d{1,2}$/.test(part);
-                      const isYear = (part) => /^\\d{2,4}$/.test(part);
-                      const isMonth = (part) => monthNames.has(part);
-                      if (normalized.length === 2) {
-                        return (isDay(normalized[0]) && isMonth(normalized[1])) || (isMonth(normalized[0]) && isDay(normalized[1]));
-                      }
-                      if (normalized.length === 3) {
-                        return (isMonth(normalized[0]) && isDay(normalized[1]) && isYear(normalized[2]))
-                          || (isDay(normalized[0]) && isMonth(normalized[1]) && isYear(normalized[2]))
-                          || (isYear(normalized[0]) && isMonth(normalized[1]) && isDay(normalized[2]));
-                      }
-                      return false;
-                    };
-                    const isNonContentText = (text) => {
-                      const normalized = text.toLowerCase();
-                      return !text || normalized === username || normalized === `@${username}` || normalized === 'translate'
-                        || isDateOnly(text)
-                        || /^(?:\\d+\\s+views?|\\d+\\s*(?:s|m|h|d|w|y|сек(?:унд[уы]?)?|с|мин(?:ута|уты|ут)?|ч(?:ас(?:а|ов)?)?|д|дн\\.?|д(?:ень|ня|ней)|нед(?:ел(?:я|и|ь))?\\.?|неделя|недели|недель|мес(?:\\.|яц(?:а|ев)?)?|г\\.?|год|года|лет|жыл|күн|сағ|апта)\\.?$)/iu.test(text);
-                    };
-                    const isPostBodyElement = (element) => {
-                      if (element.closest('button,[role="button"],time')) return false;
-                      const text = (element.innerText || '').replace(/\\s+/g, ' ').trim();
-                      if (isNonContentText(text)) return false;
-                      const link = element.closest('a[href]');
-                      if (!link) return true;
-                      const linkUrl = new URL(link.href, location.href);
-                      if (linkUrl.pathname.startsWith('/@') && !linkUrl.pathname.includes('/post/')) return false;
-                      if (isCurrentPostLink(link)) return false;
-                      if (linkUrl.pathname === '/search' && linkUrl.searchParams.has('location_id')) return false;
-                      return true;
-                    };
-                    const hasPostBodyText = (node) => {
-                      if (Array.from(node.querySelectorAll('[dir="auto"]')).some(isPostBodyElement)) return true;
-                      // Some Threads cards omit dir=auto on caption text; inspect visible leaf nodes too.
-                      return Array.from(node.querySelectorAll('p,span,div'))
-                        .filter((element) => element.children.length === 0)
-                        .some(isPostBodyElement);
-                    };
-
-                    // Threads commonly renders the timestamp link in the post header,
-                    // before the post body in DOM order. Prefer the semantic card so
-                    // that the selected container includes both pieces.
-                    let card = anchor.closest('[data-pressable-container="true"]')
-                      || anchor.closest('article,[role="article"]');
-                    if (!card) {
-                      for (let node = anchor.parentElement, depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
-                        const cardText = (node.innerText || '').trim();
-                        if (!cardText || cardText.length > 5000) continue;
-                        if (hasPostBodyText(node)) {
-                          card = node;
-                          break;
-                        }
-                      }
-                    }
-                    if (!card) continue;
-
-                    const authorLink = Array.from(card.querySelectorAll('a[href]')).find((link) => {
-                      const path = new URL(link.href, location.href).pathname;
-                      return path.startsWith('/@') && !path.includes('/post/');
-                    });
-                    const authorText = (authorLink?.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                    const getBodyTexts = (elements) => Array.from(elements)
-                      .filter(isPostBodyElement)
-                      .map((element) => (element.innerText || '')
-                        .split('\\n')
-                        .map((line) => line.replace(/\\s+/g, ' ').trim())
-                        .filter((line) => line && !isNonContentText(line) && line.toLowerCase() !== authorText)
-                        .join('\\n')
-                        .trim())
-                      .filter(Boolean);
-                    const dirTextElements = Array.from(card.querySelectorAll('[dir="auto"]'))
-                      .filter((element) => !element.querySelector('[dir="auto"]'));
-                    let bodyTexts = getBodyTexts(dirTextElements);
-                    if (!bodyTexts.length) {
-                      const plainTextElements = Array.from(card.querySelectorAll('p,span,div'))
-                        .filter((element) => element.children.length === 0);
-                      bodyTexts = getBodyTexts(plainTextElements);
-                    }
-                    const text = Array.from(new Set(bodyTexts)).join('\\n');
-                    const timestamp = card.querySelector('time[datetime]')?.getAttribute('datetime') || null;
-                    found.set(postId, {
-                      id: postId,
-                      text,
-                      username,
-                      permalink: url.origin + url.pathname,
-                      timestamp,
-                      like_count: 0,
-                      reply_count: 0,
-                      source: 'threads_web_dom'
-                    });
-                  }
-                  return Array.from(found.values());
-                }"""
+            if not found:
+                logger.error(
+                    "Threads extraction diagnostic post_id=* source=%s parser_version=%s status=%s reason=%s",
+                    "threads_search_dom",
+                    "threads-search-discovery-v2",
+                    ExtractionStatus.UNKNOWN_STRUCTURE.value,
+                    "search_page_has_no_canonical_post_permalink",
+                )
+                raise ThreadsCollectionError("Threads search returned no canonical post permalinks; result structure is unverified")
+            # Threads exposes no end-of-feed marker in the inspected structure.
+            # A stable virtualized DOM is useful to stop scrolling, but it is not
+            # proof that the server has no further pages.
+            complete = False
+            return DiscoveryResult(
+                posts=list(found.values()),
+                complete=complete,
+                rounds=rounds,
+                reason="maximum_discovered_post_limit_reached"
+                if limit_reached
+                else (
+                    "search_loading_stalled_before_end"
+                    if loading_stalled
+                    else (
+                        "search_end_marker_not_observed"
+                        if stable_rounds >= 2
+                        else "search_scroll_limit_reached_before_stable_end"
+                    )
+                ),
             )
-            if not isinstance(records, list):
-                raise ThreadsCollectionError("Threads search returned an unreadable page")
-            if not records and any(marker in (await page.locator("body").inner_text()).lower() for marker in (
-                "log in to threads", "log in to see", "войдите в threads", "войти в threads"
-            )):
-                raise ThreadsCollectionError("Threads web session is not authenticated. Import a fresh Playwright storage state.")
-            return [record for record in records if isinstance(record, dict)]
         except ThreadsCollectionError:
             raise
         except Exception as exc:
-            logger.warning("Threads web search failed (%s)", type(exc).__name__)
+            logger.warning("Threads search discovery failed (%s)", type(exc).__name__)
             raise ThreadsCollectionError("Threads web search failed. Check the imported session and try again.") from exc
         finally:
             if context is not None:
@@ -268,3 +456,192 @@ async def search_keyword_web(db: AsyncSession, phrase: str) -> list[dict[str, An
                     await context.close()
                 except Exception:
                     logger.debug("Could not close the Threads browser context cleanly")
+
+
+def _failed_result(candidate: DiscoveredPost, status: ExtractionStatus, reason: str) -> PostExtraction:
+    return PostExtraction(
+        post_id=candidate.post_id,
+        username=candidate.username,
+        permalink=candidate.permalink,
+        text=None,
+        status=status,
+        source=POST_DOM_SOURCE,
+        parser_version=PARSER_VERSION,
+        reason=reason,
+    )
+
+
+def _route_matches(url: str, candidate: DiscoveredPost) -> bool:
+    parsed = urlparse(url)
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    return (
+        parsed.hostname in {"threads.com", "www.threads.com", "threads.net", "www.threads.net"}
+        and len(parts) == 3
+        and parts[0].casefold() == f"@{candidate.username}".casefold()
+        and parts[1] == "post"
+        and parts[2] == candidate.post_id
+    )
+
+
+async def fetch_post_pages(db: AsyncSession, candidates: list[DiscoveredPost]) -> dict[str, PostExtraction]:
+    """Visit each exact permalink and parse only the identity-matched post root."""
+    try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    except ImportError as exc:
+        raise ThreadsCollectionError("Playwright is not installed in the backend runtime") from exc
+
+    results: dict[str, PostExtraction] = {}
+    eligible = candidates[:_MAX_POST_FETCHES_PER_RUN]
+    overflow = candidates[_MAX_POST_FETCHES_PER_RUN:]
+    for candidate in overflow:
+        results[candidate.post_id] = _failed_result(
+            candidate,
+            ExtractionStatus.INCOMPLETE,
+            "maximum_post_fetch_limit_reached",
+        )
+    if not eligible:
+        return results
+
+    async with _browser_lock:
+        context = None
+        try:
+            context = await _new_authenticated_context(db)
+            page = await context.new_page()
+            for candidate_index, candidate in enumerate(eligible):
+                last_result: PostExtraction | None = None
+                session_failure_reason: str | None = None
+                for attempt in range(_POST_FETCH_ATTEMPTS):
+                    try:
+                        try:
+                            response = await page.goto(candidate.permalink, wait_until="domcontentloaded", timeout=45_000)
+                        except PlaywrightTimeoutError:
+                            last_result = _failed_result(candidate, ExtractionStatus.INCOMPLETE, "post_navigation_timeout")
+                            continue
+                        try:
+                            await _raise_for_auth_or_challenge(page)
+                        except ThreadsCollectionError as exc:
+                            session_failure_reason = (
+                                "session_expired"
+                                if "expired" in str(exc).casefold()
+                                else "account_verification_required"
+                            )
+                            last_result = _failed_result(candidate, ExtractionStatus.INCOMPLETE, session_failure_reason)
+                            break
+                        status_code = response.status if response is not None else None
+                        if status_code in {404, 410}:
+                            last_result = _failed_result(candidate, ExtractionStatus.UNAVAILABLE, f"http_{status_code}")
+                            break
+                        if status_code is not None and (status_code >= 500 or status_code in {403, 429}):
+                            last_result = _failed_result(candidate, ExtractionStatus.INCOMPLETE, f"http_{status_code}")
+                            continue
+                        if not _route_matches(page.url, candidate):
+                            last_result = _failed_result(candidate, ExtractionStatus.UNKNOWN_STRUCTURE, "landed_on_different_post_route")
+                            break
+                        expected = {"postId": candidate.post_id, "username": candidate.username}
+                        await page.wait_for_function(
+                            _POST_ROOT_AND_READY_SCRIPT,
+                            arg=expected,
+                            timeout=_POST_READY_TIMEOUT_MS,
+                        )
+                        snapshot = await page.evaluate(_POST_SNAPSHOT_SCRIPT, expected)
+                        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("html"), str):
+                            reason = snapshot.get("reason") if isinstance(snapshot, dict) else "post_dom_snapshot_invalid"
+                            last_result = _failed_result(candidate, ExtractionStatus.UNKNOWN_STRUCTURE, str(reason or "post_dom_snapshot_invalid"))
+                            break
+                        last_result = parse_post_card_html(
+                            snapshot["html"],
+                            expected_post_id=candidate.post_id,
+                            expected_username=candidate.username,
+                            permalink=candidate.permalink,
+                            timestamp=snapshot.get("timestamp") if isinstance(snapshot.get("timestamp"), str) else None,
+                        )
+                        break
+                    except PlaywrightTimeoutError:
+                        snapshot = await page.evaluate(_POST_SNAPSHOT_SCRIPT, {
+                            "postId": candidate.post_id,
+                            "username": candidate.username,
+                        })
+                        if isinstance(snapshot, dict) and isinstance(snapshot.get("html"), str):
+                            parsed = parse_post_card_html(
+                                snapshot["html"],
+                                expected_post_id=candidate.post_id,
+                                expected_username=candidate.username,
+                                permalink=candidate.permalink,
+                                timestamp=snapshot.get("timestamp") if isinstance(snapshot.get("timestamp"), str) else None,
+                            )
+                            if parsed.confirmed:
+                                last_result = parsed
+                            elif (
+                                snapshot.get("isLoading")
+                                or snapshot.get("hasUnreadyMedia")
+                                or parsed.reason == "body_region_is_present_but_empty"
+                            ):
+                                last_result = _failed_result(candidate, ExtractionStatus.INCOMPLETE, "target_post_content_still_loading")
+                            else:
+                                last_result = parsed
+                        else:
+                            reason = snapshot.get("reason") if isinstance(snapshot, dict) else "target_post_identity_not_ready"
+                            normalized_reason = str(reason or "target_post_identity_not_ready")
+                            status = (
+                                ExtractionStatus.INCOMPLETE
+                                if normalized_reason == "target_permalink_anchor_missing"
+                                else ExtractionStatus.UNKNOWN_STRUCTURE
+                            )
+                            last_result = _failed_result(candidate, status, normalized_reason)
+                    except ThreadsCollectionError:
+                        raise
+                    except Exception as exc:
+                        last_result = _failed_result(candidate, ExtractionStatus.INCOMPLETE, f"page_fetch_error:{type(exc).__name__}")
+                    if last_result.status not in {ExtractionStatus.INCOMPLETE, ExtractionStatus.UNAVAILABLE}:
+                        break
+                    if attempt + 1 < _POST_FETCH_ATTEMPTS:
+                        continue
+
+                if last_result is None:
+                    last_result = _failed_result(candidate, ExtractionStatus.INCOMPLETE, "post_fetch_attempts_exhausted")
+                results[candidate.post_id] = last_result
+                logger.info(
+                    "Threads extraction diagnostic post_id=%s source=%s parser_version=%s status=%s reason=%s",
+                    last_result.post_id,
+                    last_result.source,
+                    last_result.parser_version,
+                    last_result.status.value,
+                    last_result.reason,
+                )
+                if session_failure_reason is not None:
+                    for remaining in eligible[candidate_index + 1:]:
+                        results[remaining.post_id] = _failed_result(
+                            remaining,
+                            ExtractionStatus.INCOMPLETE,
+                            session_failure_reason,
+                        )
+                    break
+        except ThreadsCollectionError:
+            raise
+        except Exception as exc:
+            logger.warning("Threads post fetch batch failed (%s)", type(exc).__name__)
+            for candidate in eligible:
+                results.setdefault(
+                    candidate.post_id,
+                    _failed_result(candidate, ExtractionStatus.INCOMPLETE, f"browser_batch_error:{type(exc).__name__}"),
+                )
+        finally:
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception:
+                    logger.debug("Could not close the Threads browser context cleanly")
+    return results
+
+
+async def search_keyword_web(db: AsyncSession, phrase: str) -> tuple[list[PostExtraction], bool, str | None]:
+    """Compatibility facade that fetches each discovered post by its permalink."""
+    discovery = await discover_keyword_posts(db, phrase)
+    fetched = await fetch_post_pages(db, discovery.posts)
+    extractions = [
+        fetched[candidate.post_id]
+        if candidate.post_id in fetched
+        else _failed_result(candidate, ExtractionStatus.INCOMPLETE, "post_fetch_result_missing")
+        for candidate in discovery.posts
+    ]
+    return extractions, discovery.complete, discovery.reason

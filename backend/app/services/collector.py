@@ -10,12 +10,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import SessionFactory
 from app.models import Keyword, Post
-from app.services.filter_service import apply_post_filters, load_filter_context, remember_post
+from app.services.filter_service import recalculate_post_filter_state
 from app.services.notifier import send_posts
 from app.services.settings_service import get_setting
 from app.services.threads_client import search_keyword
 from app.services.threads_errors import ThreadsCollectionError
-from app.services.threads_web_client import search_keyword_web
+from app.services.threads_post_parser import (
+    CONFIRMED_STATUSES,
+    ExtractionStatus,
+    PostExtraction,
+    PARSER_VERSION,
+    POST_DOM_SOURCE,
+    add_extraction_diagnostic,
+    extraction_is_currently_confirmed,
+    extraction_diagnostic,
+    parse_api_post,
+)
+from app.services.threads_web_client import discover_keyword_posts, fetch_post_pages
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +49,20 @@ def parse_timestamp(value: Any) -> datetime | None:
 
 
 def post_from_api(item: dict[str, Any], keyword_id: int | None) -> Post | None:
-    """Map a Threads media object into the persistent post model."""
-    post_id = item.get("id")
-    if post_id is None:
+    """Map an API object after its post identity and text fields were validated."""
+    extraction = parse_api_post(item)
+    if not extraction.post_id:
         return None
-    text = item.get("text")
     return Post(
-        threads_post_id=str(post_id),
-        text=text if isinstance(text, str) else "",
-        author_username=str(item.get("username") or item.get("author_username") or ""),
-        permalink=str(item.get("permalink") or ""),
-        post_timestamp=parse_timestamp(item.get("timestamp")),
-        likes_count=_nonnegative_int(item.get("like_count", item.get("likes_count", 0))),
-        replies_count=_nonnegative_int(item.get("reply_count", item.get("replies_count", 0))),
+        threads_post_id=extraction.post_id,
+        text=extraction.text if extraction.confirmed and extraction.text is not None else "",
+        author_username=extraction.username,
+        permalink=extraction.permalink,
+        post_timestamp=parse_timestamp(extraction.timestamp),
+        likes_count=extraction.likes_count,
+        replies_count=extraction.replies_count,
         matched_keyword_id=keyword_id,
-        raw_data=item,
+        raw_data={"source": extraction.source, "extraction": extraction.diagnostic()},
     )
 
 
@@ -69,46 +79,206 @@ async def collect_keyword(
     keyword: Keyword,
     notify: bool = True,
     notification_batch: list[int] | None = None,
-) -> dict[str, int]:
+) -> dict[str, int | bool | str | None]:
     """Fetch, filter, de-duplicate, and persist one keyword's latest results."""
     method = await get_setting(db, "threads_collection_method") or "web"
     if method == "api":
-        records = await search_keyword(db, keyword.phrase)
+        api_records = await search_keyword(db, keyword.phrase)
+        extractions = [parse_api_post(item) for item in api_records]
+        scanned = len(api_records)
+        discovery_complete = True
+        discovery_reason = None
     elif method == "web":
-        records = await search_keyword_web(db, keyword.phrase)
+        discovery = await discover_keyword_posts(db, keyword.phrase)
+        scanned = len(discovery.posts)
+        discovery_complete = discovery.complete
+        discovery_reason = discovery.reason
+        if not discovery.complete:
+            logger.warning(
+                "Threads discovery diagnostic source=threads_search_dom parser_version=%s status=%s reason=%s rounds=%s",
+                "threads-search-discovery-v1",
+                ExtractionStatus.INCOMPLETE.value,
+                discovery.reason,
+                discovery.rounds,
+            )
+        existing_rows = await _load_existing_posts(db, [candidate.post_id for candidate in discovery.posts])
+        candidates_to_fetch = [
+            candidate for candidate in discovery.posts
+            if not _is_confirmed(existing_rows.get(candidate.post_id), candidate.post_id)
+        ]
+        fetched = await fetch_post_pages(db, candidates_to_fetch)
+        extractions = [
+            fetched.get(candidate.post_id)
+            or PostExtraction(
+                post_id=candidate.post_id,
+                username=candidate.username,
+                permalink=candidate.permalink,
+                text=None,
+                status=ExtractionStatus.INCOMPLETE,
+                source=POST_DOM_SOURCE,
+                parser_version=PARSER_VERSION,
+                reason="post_page_extraction_result_missing",
+            )
+            for candidate in candidates_to_fetch
+        ]
     else:
         raise ThreadsCollectionError("Unknown Threads collection method")
+
+    extraction_failures = 0
+    recovered_rows = 0
     saved_posts: list[Post] = []
-    filter_context = await load_filter_context(db) if records else None
-    for item in records:
-        post = post_from_api(item, keyword.id)
-        if post is None:
+    affected_post_ids: set[int] = set()
+    if method == "api":
+        existing_rows = await _load_existing_posts(
+            db,
+            [extraction.post_id for extraction in extractions if extraction.post_id],
+        )
+
+    for extraction in extractions:
+        if not extraction.post_id:
+            extraction_failures += 1
+            logger.error(
+                "Threads extraction diagnostic post_id=* source=%s parser_version=%s status=%s reason=%s",
+                extraction.source,
+                extraction.parser_version,
+                extraction.status.value,
+                extraction.reason,
+            )
             continue
-        existing = await db.scalar(select(Post.id).where(Post.threads_post_id == post.threads_post_id))
-        if existing is not None:
+
+        post = existing_rows.get(extraction.post_id)
+        if post is not None:
+            current = extraction_diagnostic(post.raw_data, post.threads_post_id)
+            was_confirmed = current.get("status") in CONFIRMED_STATUSES
+            was_currently_confirmed = extraction_is_currently_confirmed(
+                post.raw_data,
+                post.threads_post_id,
+            )
+            previous_text = post.text
+            if extraction.confirmed:
+                _apply_confirmed_extraction(post, extraction)
+                content_changed = (
+                    not was_currently_confirmed
+                    or previous_text != (extraction.text or "")
+                    or extraction.status.value != current.get("status")
+                )
+                if content_changed:
+                    recovered_rows += 1
+                if content_changed:
+                    affected_post_ids.add(post.id)
+            else:
+                if was_confirmed:
+                    # Preserve text and confirmed diagnostic; only retain the retry result.
+                    post.raw_data = add_extraction_diagnostic(post.raw_data, extraction)
+                else:
+                    _apply_unconfirmed_extraction(post, extraction)
+                extraction_failures += 1
             continue
-        assert filter_context is not None
-        await apply_post_filters(post, filter_context, keyword.phrase)
+
+        post = _new_post(extraction, keyword.id)
         try:
             async with db.begin_nested():
                 db.add(post)
                 await db.flush()
         except IntegrityError:
+            # Another collector may have inserted this ID between discovery and save.
             continue
-        remember_post(post, filter_context)
+        existing_rows[extraction.post_id] = post
         saved_posts.append(post)
+        if extraction.confirmed:
+            affected_post_ids.add(post.id)
+        elif not extraction.confirmed:
+            extraction_failures += 1
+
+    if affected_post_ids:
+        await recalculate_post_filter_state(db, affected_post_ids)
 
     keyword.last_polled_at = datetime.now(timezone.utc)
     await db.commit()
-    deliverable = [post for post in saved_posts if post.is_relevant and not post.is_duplicate]
+    deliverable = [
+        post for post in saved_posts
+        if extraction_diagnostic(post.raw_data, post.threads_post_id).get("status") == ExtractionStatus.SUCCESS.value
+        and post.is_relevant
+        and not post.is_duplicate
+    ]
     if notify and deliverable:
         await send_posts(db, deliverable)
     elif notification_batch is not None:
         notification_batch.extend(post.id for post in deliverable)
-    return {"scanned": len(records), "saved": len(saved_posts)}
+    return {
+        "scanned": scanned,
+        "saved": len(saved_posts),
+        "updated": recovered_rows,
+        "extraction_failures": extraction_failures,
+        "discovery_complete": discovery_complete,
+        "discovery_reason": discovery_reason,
+    }
 
 
-async def collect_keyword_id(keyword_id: int, notify: bool = True) -> dict[str, int]:
+async def _load_existing_posts(db: AsyncSession, post_ids: list[str]) -> dict[str, Post]:
+    if not post_ids:
+        return {}
+    posts = list((await db.scalars(select(Post).where(Post.threads_post_id.in_(set(post_ids))))).all())
+    return {post.threads_post_id: post for post in posts}
+
+
+def _is_confirmed(post: Post | None, expected_post_id: str) -> bool:
+    if post is None:
+        return False
+    return (
+        post.threads_post_id == expected_post_id
+        and extraction_is_currently_confirmed(post.raw_data, expected_post_id)
+    )
+
+
+def _new_post(extraction: PostExtraction, keyword_id: int) -> Post:
+    return Post(
+        threads_post_id=extraction.post_id,
+        text=(extraction.text or "") if extraction.confirmed else "",
+        author_username=extraction.username,
+        permalink=extraction.permalink,
+        post_timestamp=parse_timestamp(extraction.timestamp),
+        likes_count=extraction.likes_count,
+        replies_count=extraction.replies_count,
+        matched_keyword_id=keyword_id,
+        raw_data={"source": extraction.source, "extraction": extraction.diagnostic()},
+    )
+
+
+def _apply_confirmed_extraction(post: Post, extraction: PostExtraction) -> None:
+    post.text = extraction.text or ""
+    post.author_username = extraction.username
+    post.permalink = extraction.permalink
+    parsed_timestamp = parse_timestamp(extraction.timestamp)
+    if parsed_timestamp is not None:
+        post.post_timestamp = parsed_timestamp
+    if extraction.source == "threads_graph_api":
+        post.likes_count = extraction.likes_count
+        post.replies_count = extraction.replies_count
+    if extraction.status == ExtractionStatus.NO_TEXT:
+        post.is_relevant = True
+        post.is_duplicate = False
+        post.duplicate_of_id = None
+    raw_data = add_extraction_diagnostic(post.raw_data, extraction)
+    raw_data["source"] = extraction.source
+    post.raw_data = raw_data
+
+
+def _apply_unconfirmed_extraction(post: Post, extraction: PostExtraction) -> None:
+    post.text = ""
+    if extraction.username:
+        post.author_username = extraction.username
+    if extraction.permalink:
+        post.permalink = extraction.permalink
+    post.is_relevant = True
+    post.is_duplicate = False
+    post.duplicate_of_id = None
+    raw_data = add_extraction_diagnostic(post.raw_data, extraction)
+    raw_data["source"] = extraction.source
+    post.raw_data = raw_data
+
+
+async def collect_keyword_id(keyword_id: int, notify: bool = True) -> dict[str, int | bool | str | None]:
     """Load and collect one keyword in an isolated session."""
     async with SessionFactory() as db:
         keyword = await db.get(Keyword, keyword_id)

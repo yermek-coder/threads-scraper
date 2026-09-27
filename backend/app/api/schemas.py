@@ -99,6 +99,12 @@ class PostRead(BaseModel):
     is_read: bool
     raw_data: dict[str, Any]
     created_at: datetime
+    extraction_status: str = "legacy_unverified"
+    extraction_source: str = "unknown"
+    extraction_parser_version: str = "legacy"
+    extraction_reason: str | None = None
+    extraction_last_attempt_status: str | None = None
+    extraction_last_attempt_reason: str | None = None
 
 
 class PostPage(BaseModel):
@@ -231,4 +237,8 @@ class CollectResponse(BaseModel):
     keyword_id: int | None
     scanned: int = 0
     saved: int = 0
+    updated: int = 0
+    extraction_failures: int = 0
+    discovery_complete: bool = True
+    discovery_reason: str | None = None
     error: str | None = None

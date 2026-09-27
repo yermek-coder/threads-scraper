@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import SessionFactory
 from app.models import Keyword, Post, StopWord
 from app.services.settings_service import DEFAULT_JEV_RELEVANCE_PROMPT, get_setting
+from app.services.threads_post_parser import CONFIRMED_STATUSES, extraction_diagnostic
 
 FUZZY_DUPLICATE_THRESHOLD = 85
 DUPLICATE_CANDIDATE_LIMIT = 2000
@@ -41,13 +42,17 @@ async def load_filter_context(db: AsyncSession) -> FilterContext:
     stop_words = tuple((await db.scalars(select(StopWord.word_or_phrase))).all())
     rows = (
         await db.execute(
-            select(Post.id, Post.text)
-            .where(Post.is_duplicate.is_(False), Post.text != "")
+            select(Post.id, Post.threads_post_id, Post.text, Post.raw_data)
+            .where(Post.is_duplicate.is_(False))
             .order_by(Post.created_at.desc())
             .limit(DUPLICATE_CANDIDATE_LIMIT)
         )
     ).all()
-    candidates = [(post_id, text) for post_id, text in rows if text]
+    candidates = [
+        (post_id, text)
+        for post_id, threads_post_id, text, raw_data in rows
+        if text and extraction_diagnostic(raw_data, threads_post_id).get("status") in CONFIRMED_STATUSES
+    ]
     api_key = await get_setting(db, "openrouter_api_key")
     return FilterContext(
         stop_words=stop_words,
@@ -84,6 +89,11 @@ def _find_duplicate_id(normalized_text: str, candidates: list[tuple[int, str]]) 
 
 async def apply_post_filters(post: Post, context: FilterContext, keyword: str = "") -> Post:
     """Set stop-word, duplicate, and optional Jev relevance state for one post."""
+    if extraction_diagnostic(post.raw_data, post.threads_post_id).get("status") not in CONFIRMED_STATUSES:
+        post.is_relevant = True
+        post.is_duplicate = False
+        post.duplicate_of_id = None
+        return post
     post.is_relevant = not any(contains_stop_word(post.text, word) for word in context.stop_words)
     normalized = " ".join(post.text.casefold().split())
     if normalized:
@@ -105,7 +115,11 @@ async def apply_post_filters(post: Post, context: FilterContext, keyword: str = 
 
 def remember_post(post: Post, context: FilterContext) -> None:
     """Add a successfully saved canonical post to the current batch's duplicate candidates."""
-    if not post.is_duplicate and " ".join(post.text.casefold().split()):
+    if (
+        extraction_diagnostic(post.raw_data, post.threads_post_id).get("status") in CONFIRMED_STATUSES
+        and not post.is_duplicate
+        and " ".join(post.text.casefold().split())
+    ):
         context.duplicate_candidates.append((post.id, post.text))
 
 
@@ -141,6 +155,119 @@ async def _jev_relevance_decision(post_text: str, keyword: str, context: FilterC
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
         logger.warning("OpenRouter Jev relevance check failed: %s", type(error).__name__)
         return None
+
+
+def _duplicate_assignments(rows: list[tuple[int, str]]) -> dict[int, int | None]:
+    """Rebuild the deterministic duplicate graph from oldest to newest rows."""
+    canonical: list[tuple[int, str]] = []
+    assignments: dict[int, int | None] = {}
+    for post_id, text in rows:
+        normalized = " ".join(text.casefold().split())
+        if not normalized:
+            assignments[post_id] = None
+            continue
+        duplicate_id = _find_duplicate_id(normalized, canonical)
+        assignments[post_id] = duplicate_id
+        if duplicate_id is None:
+            canonical.append((post_id, text))
+    return assignments
+
+
+async def recalculate_post_filter_state(db: AsyncSession, affected_post_ids: set[int]) -> None:
+    """Recompute verified duplicate links and filters after corrected text is saved.
+
+    The recent candidate window matches normal ingestion. Rows outside that
+    window are included when they are directly affected by a changed canonical
+    post. This function never sends notifications.
+    """
+    if not affected_post_ids:
+        return
+    context = await load_filter_context(db)
+    dependent_ids = set(
+        (
+            await db.scalars(
+                select(Post.id).where(Post.duplicate_of_id.in_(affected_post_ids))
+            )
+        ).all()
+    )
+    included_ids = affected_post_ids | dependent_ids
+    recent_rows = (
+        await db.execute(
+            select(Post, Keyword.phrase)
+            .outerjoin(Keyword, Keyword.id == Post.matched_keyword_id)
+            .order_by(Post.created_at.desc(), Post.id.desc())
+            .limit(DUPLICATE_CANDIDATE_LIMIT)
+        )
+    ).all()
+    relevant_rows = {
+        post.id: (post, phrase)
+        for post, phrase in recent_rows
+    }
+    missing_ids = included_ids - relevant_rows.keys()
+    if missing_ids:
+        extra_rows = (
+            await db.execute(
+                select(Post, Keyword.phrase)
+                .outerjoin(Keyword, Keyword.id == Post.matched_keyword_id)
+                .where(Post.id.in_(missing_ids))
+            )
+        ).all()
+        relevant_rows.update({post.id: (post, phrase) for post, phrase in extra_rows})
+
+    posts = [post for post, _phrase in relevant_rows.values()]
+    verified_text_posts = [
+        post for post in posts
+        if post.text
+        and extraction_diagnostic(post.raw_data, post.threads_post_id).get("status") == "success"
+    ]
+    ordered = sorted(verified_text_posts, key=lambda post: (post.created_at, post.id))
+    assignments = await asyncio.to_thread(
+        _duplicate_assignments,
+        [(post.id, post.text) for post in ordered],
+    )
+    changed_relevance_ids = set(affected_post_ids)
+    for post in posts:
+        extraction_status = extraction_diagnostic(post.raw_data, post.threads_post_id).get("status")
+        if extraction_status == "success":
+            duplicate_of_id = assignments.get(post.id)
+            was_duplicate = post.is_duplicate
+            post.is_duplicate = duplicate_of_id is not None
+            post.duplicate_of_id = duplicate_of_id
+            if was_duplicate != post.is_duplicate:
+                changed_relevance_ids.add(post.id)
+        elif extraction_status in CONFIRMED_STATUSES:
+            post.is_duplicate = False
+            post.duplicate_of_id = None
+            post.is_relevant = True
+        else:
+            post.is_duplicate = False
+            post.duplicate_of_id = None
+            post.is_relevant = True
+
+    relevance_targets: list[tuple[Post, str]] = []
+    for post_id in changed_relevance_ids:
+        pair = relevant_rows.get(post_id)
+        if pair is None:
+            continue
+        post, phrase = pair
+        if extraction_diagnostic(post.raw_data, post.threads_post_id).get("status") != "success":
+            continue
+        post.is_relevant = not any(contains_stop_word(post.text, word) for word in context.stop_words)
+        if post.is_relevant and not post.is_duplicate and context.jev_relevance_enabled and context.openrouter_api_key:
+            relevance_targets.append((post, phrase or ""))
+
+    # Re-evaluate only recovered/new canonical posts and dependents that became
+    # canonical, rather than re-sending all historical posts to the Jev API.
+    semaphore = asyncio.Semaphore(JEV_REPROCESS_CONCURRENCY)
+
+    async def decide(post: Post, phrase: str) -> bool | None:
+        async with semaphore:
+            return await _jev_relevance_decision(post.text, phrase, context)
+
+    decisions = await asyncio.gather(*(decide(post, phrase) for post, phrase in relevance_targets))
+    for (post, _phrase), decision in zip(relevance_targets, decisions, strict=True):
+        if decision is not None:
+            post.is_relevant = decision
 
 
 async def reprocess_recent_posts_for_relevance() -> None:

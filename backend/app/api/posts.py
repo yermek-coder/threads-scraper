@@ -3,16 +3,76 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import PostPage, PostRead, PostStatusUpdate
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models import Keyword, Post
+from app.services.threads_post_parser import extraction_diagnostic
 
 router = APIRouter(prefix="/posts", tags=["posts"], dependencies=[Depends(get_current_user)])
 DbDep = Annotated[AsyncSession, Depends(get_db)]
+
+
+def _post_read(post: Post, phrase: str | None) -> PostRead:
+    diagnostic = extraction_diagnostic(post.raw_data, post.threads_post_id)
+    raw_data = post.raw_data if isinstance(post.raw_data, dict) else {}
+    last_attempt = raw_data.get("extraction_last_attempt")
+    status_value = str(diagnostic.get("status") or "legacy_unverified")
+    safe_diagnostic = {
+        "post_id": post.threads_post_id,
+        "source": str(diagnostic.get("source") or "unknown"),
+        "parser_version": str(diagnostic.get("parser_version") or "legacy"),
+        "status": status_value,
+        "reason": diagnostic.get("reason") if isinstance(diagnostic.get("reason"), str) else None,
+        "attempted_at": diagnostic.get("attempted_at") if isinstance(diagnostic.get("attempted_at"), str) else None,
+    }
+    safe_raw_data = {"source": safe_diagnostic["source"], "extraction": safe_diagnostic}
+    if isinstance(last_attempt, dict):
+        safe_raw_data["extraction_last_attempt"] = {
+            "post_id": post.threads_post_id,
+            "source": str(last_attempt.get("source") or "unknown"),
+            "parser_version": str(last_attempt.get("parser_version") or "unknown"),
+            "status": str(last_attempt.get("status") or "unknown"),
+            "reason": last_attempt.get("reason") if isinstance(last_attempt.get("reason"), str) else None,
+            "attempted_at": last_attempt.get("attempted_at") if isinstance(last_attempt.get("attempted_at"), str) else None,
+        }
+    return PostRead(
+        id=post.id,
+        threads_post_id=post.threads_post_id,
+        # Old heuristic text remains in storage for audit/recovery, but is never
+        # represented to clients as verified content.
+        text=post.text if status_value == "success" else "",
+        author_username=post.author_username,
+        permalink=post.permalink,
+        post_timestamp=post.post_timestamp,
+        likes_count=post.likes_count,
+        replies_count=post.replies_count,
+        matched_keyword_id=post.matched_keyword_id,
+        matched_keyword=phrase,
+        is_relevant=post.is_relevant,
+        is_duplicate=post.is_duplicate,
+        duplicate_of_id=post.duplicate_of_id,
+        is_read=post.is_read,
+        raw_data=safe_raw_data,
+        created_at=post.created_at,
+        extraction_status=status_value,
+        extraction_source=str(diagnostic.get("source") or "unknown"),
+        extraction_parser_version=str(diagnostic.get("parser_version") or "legacy"),
+        extraction_reason=diagnostic.get("reason") if isinstance(diagnostic.get("reason"), str) else None,
+        extraction_last_attempt_status=(
+            str(last_attempt.get("status"))
+            if isinstance(last_attempt, dict) and isinstance(last_attempt.get("status"), str)
+            else None
+        ),
+        extraction_last_attempt_reason=(
+            last_attempt.get("reason")
+            if isinstance(last_attempt, dict) and isinstance(last_attempt.get("reason"), str)
+            else None
+        ),
+    )
 
 
 @router.get("", response_model=PostPage)
@@ -38,7 +98,12 @@ async def list_posts(
         filters.append(Post.is_duplicate.is_(False))
     if q and q.strip():
         term = f"%{q.strip()}%"
-        filters.append((Post.text.ilike(term)) | (Post.author_username.ilike(term)))
+        verified_text = and_(
+            Post.raw_data["extraction"]["status"].as_string() == "success",
+            Post.raw_data["extraction"]["post_id"].as_string() == Post.threads_post_id,
+            Post.text.ilike(term),
+        )
+        filters.append(verified_text | Post.author_username.ilike(term))
 
     total = int(await db.scalar(select(func.count(Post.id)).where(*filters)) or 0)
     rows = (
@@ -51,27 +116,7 @@ async def list_posts(
             .limit(page_size)
         )
     ).all()
-    items = [
-        PostRead(
-            id=post.id,
-            threads_post_id=post.threads_post_id,
-            text=post.text,
-            author_username=post.author_username,
-            permalink=post.permalink,
-            post_timestamp=post.post_timestamp,
-            likes_count=post.likes_count,
-            replies_count=post.replies_count,
-            matched_keyword_id=post.matched_keyword_id,
-            matched_keyword=phrase,
-            is_relevant=post.is_relevant,
-            is_duplicate=post.is_duplicate,
-            duplicate_of_id=post.duplicate_of_id,
-            is_read=post.is_read,
-            raw_data=post.raw_data,
-            created_at=post.created_at,
-        )
-        for post, phrase in rows
-    ]
+    items = [_post_read(post, phrase) for post, phrase in rows]
     return PostPage(items=items, total=total, page=page, page_size=page_size)
 
 
@@ -89,24 +134,7 @@ async def update_post_status(post_id: int, payload: PostStatusUpdate, db: DbDep)
     await db.commit()
     await db.refresh(post)
     phrase = await db.scalar(select(Keyword.phrase).where(Keyword.id == post.matched_keyword_id))
-    return PostRead(
-        id=post.id,
-        threads_post_id=post.threads_post_id,
-        text=post.text,
-        author_username=post.author_username,
-        permalink=post.permalink,
-        post_timestamp=post.post_timestamp,
-        likes_count=post.likes_count,
-        replies_count=post.replies_count,
-        matched_keyword_id=post.matched_keyword_id,
-        matched_keyword=phrase,
-        is_relevant=post.is_relevant,
-        is_duplicate=post.is_duplicate,
-        duplicate_of_id=post.duplicate_of_id,
-        is_read=post.is_read,
-        raw_data=post.raw_data,
-        created_at=post.created_at,
-    )
+    return _post_read(post, phrase)
 
 
 @router.delete("/{post_id}", status_code=status.HTTP_204_NO_CONTENT)

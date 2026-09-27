@@ -26,6 +26,12 @@ export type Post = {
   duplicate_of_id: number | null;
   is_read: boolean;
   created_at: string;
+  extraction_status: 'success' | 'no_text' | 'incomplete' | 'unavailable' | 'unknown_structure' | 'legacy_unverified';
+  extraction_source: string;
+  extraction_parser_version: string;
+  extraction_reason: string | null;
+  extraction_last_attempt_status: string | null;
+  extraction_last_attempt_reason: string | null;
 };
 
 export type PostPage = {
@@ -59,6 +65,10 @@ export type CollectResult = {
   keyword_id: number | null;
   scanned: number;
   saved: number;
+  updated: number;
+  extraction_failures: number;
+  discovery_complete: boolean;
+  discovery_reason: string | null;
   error: string | null;
 };
 

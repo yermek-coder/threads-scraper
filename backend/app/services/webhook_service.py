@@ -1,6 +1,7 @@
 """Threads webhook verification support and mention/reply event ingestion."""
 
 import logging
+from dataclasses import replace
 from typing import Any, Iterator
 
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from app.models import Post
 from app.services.collector import parse_timestamp, _nonnegative_int
 from app.services.filter_service import apply_post_filters, load_filter_context
 from app.services.notifier import send_posts
+from app.services.threads_post_parser import ExtractionStatus, parse_api_post
 
 logger = logging.getLogger(__name__)
 
@@ -45,32 +47,49 @@ async def process_webhook_payload(db: AsyncSession, payload: dict[str, Any]) -> 
     event_posts = list(_event_posts(payload))
     filter_context = await load_filter_context(db) if event_posts else None
     for item in event_posts:
-        post_id = str(item["id"])
+        extraction = parse_api_post(item)
+        if not extraction.post_id:
+            logger.warning(
+                "Threads extraction diagnostic post_id=* source=%s parser_version=%s status=%s reason=%s",
+                extraction.source,
+                extraction.parser_version,
+                extraction.status.value,
+                extraction.reason,
+            )
+            continue
+        extraction = replace(extraction, source="threads_webhook", parser_version="threads-webhook-v1")
+        post_id = extraction.post_id
         exists = await db.scalar(select(Post.id).where(Post.threads_post_id == post_id))
         if exists is not None:
             continue
         post = Post(
             threads_post_id=post_id,
-            text=item.get("text", ""),
-            author_username=str(item.get("username") or ""),
-            permalink=str(item.get("permalink") or ""),
-            post_timestamp=parse_timestamp(item.get("timestamp")),
-            likes_count=_nonnegative_int(item.get("like_count", 0)),
-            replies_count=_nonnegative_int(item.get("reply_count", 0)),
-            raw_data=item,
+            text=extraction.text or "" if extraction.confirmed else "",
+            author_username=extraction.username,
+            permalink=extraction.permalink,
+            post_timestamp=parse_timestamp(extraction.timestamp),
+            likes_count=extraction.likes_count,
+            replies_count=extraction.replies_count,
+            raw_data={"source": extraction.source, "extraction": extraction.diagnostic()},
         )
         try:
             async with db.begin_nested():
                 db.add(post)
                 await db.flush()
-                assert filter_context is not None
-                await apply_post_filters(post, filter_context)
+                if extraction.status == ExtractionStatus.SUCCESS:
+                    assert filter_context is not None
+                    await apply_post_filters(post, filter_context)
                 await db.flush()
         except IntegrityError:
             continue
         incoming.append(post)
     await db.commit()
-    alerts = [post for post in incoming if post.is_relevant and not post.is_duplicate]
+    alerts = [
+        post for post in incoming
+        if post.raw_data.get("extraction", {}).get("status") == ExtractionStatus.SUCCESS.value
+        and post.is_relevant
+        and not post.is_duplicate
+    ]
     if alerts:
         await send_posts(db, alerts, immediate=True)
     return len(incoming)

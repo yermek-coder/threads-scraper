@@ -83,6 +83,12 @@ function PostCard({
   busy?: boolean;
 }) {
   const isSafeLink = Boolean(post.permalink && /^https?:\/\//i.test(post.permalink));
+  const extractionConfirmed = post.extraction_status === 'success' || post.extraction_status === 'no_text';
+  const lastAttemptFailed = Boolean(
+    post.extraction_last_attempt_status
+    && post.extraction_last_attempt_status !== 'success'
+    && post.extraction_last_attempt_status !== 'no_text'
+  );
 
   return (
     <article className={`rounded-2xl border bg-white p-5 shadow-card transition sm:p-6 ${post.is_read ? 'border-[#e5e9ea]' : 'border-[#dce7cf] ring-1 ring-[#edf4e4]'}`}>
@@ -107,8 +113,29 @@ function PostCard({
             </div>
             <PostActionsMenu post={post} busy={busy} onDelete={onDelete} />
           </div>
-          <div className="mt-3 whitespace-pre-wrap break-words text-[14px] leading-6 text-[#354248]">{post.text || 'Пост без текста'}</div>
+          <div className="mt-3 whitespace-pre-wrap break-words text-[14px] leading-6 text-[#354248]">
+            {post.extraction_status === 'success'
+              ? post.text
+              : post.extraction_status === 'no_text'
+                ? 'Отсутствие текста подтверждено источником.'
+                : post.extraction_status === 'legacy_unverified'
+                  ? 'Содержимое старой записи не проверено. Оно будет обновлено при повторном извлечении.'
+                  : 'Не удалось подтвердить содержимое поста.'}
+          </div>
           <div className="mt-4 flex flex-wrap items-center gap-2">
+            {!extractionConfirmed && (
+              <Badge tone="amber">
+                Ошибка извлечения · {post.extraction_status.replaceAll('_', ' ')}
+                {post.extraction_reason ? ` · ${post.extraction_reason}` : ''}
+              </Badge>
+            )}
+            {post.extraction_status === 'no_text' && <Badge tone="neutral">Без текста · подтверждено</Badge>}
+            {extractionConfirmed && lastAttemptFailed && (
+              <Badge tone="amber">
+                Последняя попытка: {post.extraction_last_attempt_status?.replaceAll('_', ' ')}
+                {post.extraction_last_attempt_reason ? ` · ${post.extraction_last_attempt_reason}` : ''}
+              </Badge>
+            )}
             {post.matched_keyword && <Badge tone="blue"><span className="mr-1 opacity-70">Ключ:</span>{post.matched_keyword}</Badge>}
             {!post.is_relevant && <Badge tone="amber">Нерелевантный</Badge>}
             {post.is_duplicate && <Badge tone="neutral">Дубликат{post.duplicate_of_id ? ` · #${post.duplicate_of_id}` : ''}</Badge>}
@@ -324,12 +351,16 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
     try {
       const results = await api<CollectResult[]>('/keywords/collect', { method: 'POST' });
       const saved = results.reduce((sum, result) => sum + result.saved, 0);
+      const updated = results.reduce((sum, result) => sum + result.updated, 0);
       const scanned = results.reduce((sum, result) => sum + result.scanned, 0);
       const failures = results.filter((result) => result.error).length;
-      const message = failures
-        ? `Сбор завершён с ошибками: сохранено ${saved}, проверено ${scanned}; не удалось обработать фраз: ${failures}.`
-        : `Сбор завершён: проверено ${scanned}, сохранено новых постов: ${saved}.`;
-      notify({ kind: failures ? 'error' : 'success', message });
+      const extractionFailures = results.reduce((sum, result) => sum + result.extraction_failures, 0);
+      const incompleteDiscovery = results.some((result) => !result.discovery_complete);
+      const hasIssues = failures > 0 || extractionFailures > 0 || incompleteDiscovery;
+      const message = hasIssues
+        ? `Сбор завершён с диагностикой: проверено ${scanned}, новых ${saved}, восстановлено ${updated}, ошибок извлечения ${extractionFailures}, ошибок фраз ${failures}${incompleteDiscovery ? ', поиск не дошёл до подтверждённого конца выдачи' : ''}.`
+        : `Сбор завершён: проверено ${scanned}, новых постов ${saved}, восстановлено ${updated}.`;
+      notify({ kind: hasIssues ? 'error' : 'success', message });
       void loadKeywords();
       setPage(1);
       const fresh = await api<PostPage>(`/posts${toQuery({ page: 1, page_size: 20, keyword_id: keywordId ? Number(keywordId) : undefined, unread_only: unreadOnly, hide_irrelevant: hideIrrelevant, include_duplicates: includeDuplicates, q: debouncedSearch.trim() || undefined })}`);
