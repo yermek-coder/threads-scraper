@@ -73,6 +73,8 @@ _SEARCH_DISCOVERY_SCRIPT = r"""() => {
       return { id: parts[2], username: parts[0].slice(1), permalink: `${url.origin}${url.pathname}` };
     } catch { return null; }
   };
+  const ownPostAnchor = (card) => Array.from(card.querySelectorAll('a[href*="/post/"]'))
+    .find((anchor) => anchor.closest(cardSelector) === card && identity(anchor.href));
   const readCount = (value) => {
     const text = String(value || '').replace(/\u00a0/g, ' ').trim();
     if (!text) return null;
@@ -87,17 +89,17 @@ _SEARCH_DISCOVERY_SCRIPT = r"""() => {
     return /^[\d\s,.]+$/.test(text) ? Number(text.replace(/[\s,.]/g, '')) : null;
   };
   const cards = Array.from(column.querySelectorAll(cardSelector)).filter((card) => {
-    if (!ownTime(card)) return false;
+    if (!ownPostAnchor(card)) return false;
     for (let parent = card.parentElement?.closest(cardSelector);
          parent && column.contains(parent);
          parent = parent.parentElement?.closest(cardSelector)) {
-      if (ownTime(parent)) return false;
+      if (ownPostAnchor(parent)) return false;
     }
     return true;
   });
   for (const card of cards) {
     const time = ownTime(card);
-    const postAnchor = time?.closest('a[href]');
+    const postAnchor = ownPostAnchor(card);
     const post = postAnchor ? identity(postAnchor.href) : null;
     if (!post) continue;
     const hasAuthor = Array.from(card.querySelectorAll('a[href]')).some((anchor) => {
@@ -160,7 +162,7 @@ _SEARCH_DISCOVERY_SCRIPT = r"""() => {
       if (Number.isSafeInteger(value) && value >= 0) post[key] = value;
     }
     post.html = clone.outerHTML;
-    post.timestamp = time.getAttribute('datetime');
+    post.timestamp = time?.getAttribute('datetime') || null;
     post.is_loading = Boolean(card.querySelector('[aria-busy="true"],[role="progressbar"]'));
     post.is_truncated = Array.from(card.querySelectorAll('button,[role="button"]')).some((control) =>
       control.closest(cardSelector) === card
@@ -185,21 +187,20 @@ _SEARCH_STATE_CHANGED_SCRIPT = r"""(previous) => {
   const column = document.querySelector('[aria-label="Column body"]');
   if (!column) return true;
   const cardSelector = '[data-pressable-container="true"],article,[role="article"]';
-  const ownTime = (card) => Array.from(card.querySelectorAll('time[datetime]'))
-    .find((node) => node.closest(cardSelector) === card);
+  const ownPostLink = (card) => Array.from(card.querySelectorAll('a[href*="/post/"]'))
+    .find((anchor) => anchor.closest(cardSelector) === card);
   const signature = Array.from(column.querySelectorAll(cardSelector))
     .filter((card) => {
-      if (!ownTime(card)) return false;
+      if (!ownPostLink(card)) return false;
       for (let parent = card.parentElement?.closest(cardSelector);
            parent && column.contains(parent);
            parent = parent.parentElement?.closest(cardSelector)) {
-        if (ownTime(parent)) return false;
+        if (ownPostLink(parent)) return false;
       }
       return true;
     })
     .map((card) => {
-      const time = ownTime(card);
-      const link = time?.closest('a[href]');
+      const link = ownPostLink(card);
       return link ? `${link.getAttribute('href')}:${card.outerHTML.length}` : '';
     }).filter(Boolean).join('|');
   const isLoading = Boolean(column.querySelector('[aria-busy="true"],[role="progressbar"]'));

@@ -100,6 +100,21 @@ class SearchCardBrowserTests(unittest.TestCase):
         self.assertEqual(extractions["Main"].source, SEARCH_DOM_SOURCE)
         self.assertNotIn("Quoted", found)
 
+    def test_permalink_does_not_need_to_wrap_timestamp(self) -> None:
+        html = card("DetachedTime", text="Text survives detached timestamp")
+        html = html.replace(
+            '<a href="/@author/post/DetachedTime"><time datetime="2026-09-27T10:00:00Z">2h</time></a>',
+            '<a href="/@author/post/DetachedTime">post</a><time datetime="2026-09-27T10:00:00Z">2h</time>',
+        )
+
+        state = self._render(html)
+        found, extractions = {}, {}
+        _merge_search_cards(found, extractions, state)
+
+        self.assertEqual(list(found), ["DetachedTime"])
+        self.assertEqual(extractions["DetachedTime"].text, "Text survives detached timestamp")
+        self.assertEqual(extractions["DetachedTime"].timestamp, "2026-09-27T10:00:00Z")
+
     def test_virtualized_away_post_and_best_observation_are_retained(self) -> None:
         found, extractions = {}, {}
         first = self._render(card("First", text="First body", likes="4"))
