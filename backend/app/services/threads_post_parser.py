@@ -10,11 +10,11 @@ import json
 from typing import Any, Callable, Iterator
 from urllib.parse import unquote, urljoin, urlparse
 
-PARSER_VERSION = "threads-post-dom-v2"
+PARSER_VERSION = "threads-post-dom-v3"
 API_PARSER_VERSION = "threads-graph-api-v1"
 POST_DOM_SOURCE = "threads_post_dom"
 SEARCH_DOM_SOURCE = "threads_search_dom"
-SEARCH_PARSER_VERSION = "threads-search-dom-v1"
+SEARCH_PARSER_VERSION = "threads-search-dom-v2"
 API_SOURCE = "threads_graph_api"
 THREADS_HOSTS = frozenset({"threads.com", "www.threads.com", "threads.net", "www.threads.net"})
 
@@ -328,6 +328,18 @@ def _link_preview_roots(root: _Node) -> set[int]:
     return previews
 
 
+def _is_external_link_label(node: _Node, region: _Node) -> bool:
+    """Threads marks external link labels translate=no as well as usernames."""
+    for ancestor in node.ancestors():
+        if ancestor is region:
+            break
+        if ancestor.tag == "a":
+            href = ancestor.attrs.get("href", "")
+            host, _parts = _absolute_path(href)
+            return bool(href and host not in THREADS_HOSTS)
+    return False
+
+
 def _media_ready(node: _Node) -> bool:
     return node.attrs.get("data-threads-media-ready", "").casefold() == "true"
 
@@ -453,7 +465,11 @@ def parse_post_card_html(
         and not _inside_exclusions(node, excluded_roots)
     ]
     if len(body_regions) > 1 and any(
-        any(descendant.attrs.get("translate", "").casefold() == "no" for descendant in region.descendants())
+        any(
+            descendant.attrs.get("translate", "").casefold() == "no"
+            and not _is_external_link_label(descendant, region)
+            for descendant in region.descendants()
+        )
         for region in body_regions
     ):
         return _record(

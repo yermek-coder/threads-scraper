@@ -259,7 +259,7 @@ class ThreadsPostParserTests(unittest.TestCase):
             "extraction": {
                 "post_id": "Target1",
                 "source": "threads_post_dom",
-                "parser_version": "threads-post-dom-v2",
+                "parser_version": "threads-post-dom-v3",
                 "status": "success",
                 "reason": "body_verified",
             }

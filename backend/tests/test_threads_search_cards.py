@@ -178,6 +178,50 @@ class SearchCardBrowserTests(unittest.TestCase):
         self.assertEqual(extractions["Preview"].status, ExtractionStatus.SUCCESS)
         self.assertEqual(extractions["Preview"].text, "Own text ")
 
+    def test_multiple_paragraphs_with_untranslated_external_links(self) -> None:
+        # Reduced from DO6Kh4DkgQl captured on the Oracle search page (ru-RU).
+        for locale, column_label in (("en-US", "Column body"), ("ru-RU", "Содержимое столбца")):
+            with self.subTest(locale=locale):
+                context = self.browser.new_context(locale=locale)
+                try:
+                    page = context.new_page()
+                    html = card("ExternalLinks", text="2016 yil Toshkent")
+                    html = html.replace(
+                        '<div dir="auto">2016 yil Toshkent</div>',
+                        '<div dir="auto">2016 yil Toshkent</div>'
+                        '<div dir="auto">Clinic course.</div>'
+                        '<span dir="auto"><a href="https://l.threads.com/?u=http%3A%2F%2Fexample.com">'
+                        '<span translate="no">example.com</span></a></span>'
+                        '<span dir="auto"><a href="https://example.org">'
+                        '<span translate="no">example.org</span></a></span>',
+                    )
+                    page.set_content('<base href="https://www.threads.com/">'
+                                     f'<main aria-label="{column_label}">{html}</main>')
+                    state = page.evaluate(_SEARCH_DISCOVERY_SCRIPT)
+                    found, extractions = {}, {}
+                    _merge_search_cards(found, extractions, state)
+                    self.assertEqual(extractions["ExternalLinks"].status, ExtractionStatus.SUCCESS)
+                    self.assertEqual(extractions["ExternalLinks"].text,
+                                     "2016 yil Toshkent\nClinic course.\nexample.com\nexample.org")
+                finally:
+                    context.close()
+
+    def test_external_link_does_not_hide_ambiguous_reply_context(self) -> None:
+        for label in ("Replying to", "В ответ"):
+            with self.subTest(label=label):
+                html = card("ReplyContext", text="Own reply text")
+                html = html.replace('<div dir="auto">Own reply text</div>',
+                                    f'<span dir="auto">{label} <span translate="no">@original</span></span>'
+                                    '<div dir="auto">Own reply text</div>'
+                                    '<span dir="auto"><a href="https://example.com">'
+                                    '<span translate="no">example.com</span></a></span>')
+                state = self._render(html)
+                found, extractions = {}, {}
+                _merge_search_cards(found, extractions, state)
+                self.assertEqual(extractions["ReplyContext"].status, ExtractionStatus.UNKNOWN_STRUCTURE)
+                self.assertEqual(extractions["ReplyContext"].reason,
+                                 "multiple_body_regions_include_ambiguous_reply_context")
+
 
 if __name__ == "__main__":
     unittest.main()

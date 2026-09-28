@@ -259,6 +259,21 @@ async def _collect_keyword_run(
                     reason=extraction.reason,
                     previous_result_preserved=was_confirmed,
                 )
+                if not was_confirmed:
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "relevance.filter_skipped",
+                        run_id=run_id,
+                        source="collection",
+                        post_pk=post.id,
+                        post_id=post.threads_post_id,
+                        keyword_id=keyword.id,
+                        keyword=keyword.phrase,
+                        reason="extraction_not_success",
+                        extraction_status=extraction.status.value,
+                        final_relevant=post.is_relevant,
+                    )
             continue
 
         post = _new_post(extraction, keyword.id)
@@ -291,6 +306,20 @@ async def _collect_keyword_run(
                 status=extraction.status.value,
                 reason=extraction.reason,
                 persisted=True,
+            )
+            log_event(
+                logger,
+                logging.INFO,
+                "relevance.filter_skipped",
+                run_id=run_id,
+                source="collection",
+                post_pk=post.id,
+                post_id=post.threads_post_id,
+                keyword_id=keyword.id,
+                keyword=keyword.phrase,
+                reason="extraction_not_success",
+                extraction_status=extraction.status.value,
+                final_relevant=post.is_relevant,
             )
 
     if affected_post_ids:
