@@ -73,10 +73,10 @@ async def collect_one_keyword(keyword_id: int, db: DbDep) -> CollectResponse:
     if keyword is None:
         raise HTTPException(status_code=404, detail="Keyword not found")
     try:
-        result = await collect_keyword(db, keyword)
+        result = await collect_keyword(db, keyword, search_sections=("recent", "top"))
     except ThreadsCollectionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return CollectResponse(keyword_id=keyword_id, **result)
+    return CollectResponse.model_validate({"keyword_id": keyword_id, **result})
 
 
 @router.post("/collect", response_model=list[CollectResponse])
@@ -90,12 +90,20 @@ async def collect_active_keywords(db: DbDep) -> list[CollectResponse]:
             keyword = await db.get(Keyword, keyword_id)
             if keyword is None or not keyword.is_active:
                 continue
-            result = await collect_keyword(db, keyword, notify=False, notification_batch=notification_batch)
+            result = await collect_keyword(
+                db,
+                keyword,
+                notify=False,
+                notification_batch=notification_batch,
+                search_sections=("recent", "top"),
+            )
         except ThreadsCollectionError as exc:
             await db.rollback()
             results.append(CollectResponse(keyword_id=keyword_id, error=str(exc)))
             continue
-        results.append(CollectResponse(keyword_id=keyword_id, **result))
+        results.append(
+            CollectResponse.model_validate({"keyword_id": keyword_id, **result})
+        )
     if notification_batch:
         posts = list((await db.scalars(select(Post).where(Post.id.in_(notification_batch)))).all())
         await send_posts(db, posts)

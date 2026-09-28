@@ -5,11 +5,12 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+
 from app.core.config import config
 from app.core.database import SessionFactory
+from app.services.collector import poll_active_keywords
 from app.services.settings_service import get_setting
 from app.services.threads_client import refresh_access_token
-from app.services.collector import poll_active_keywords
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="UTC")
@@ -48,6 +49,15 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(minutes=config.threads_poll_interval_minutes),
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=15),
         id="threads-keyword-poll",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        poll_active_keywords,
+        trigger=IntervalTrigger(hours=6),
+        kwargs={"search_sections": ("top",)},
+        id="threads-top-poll",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

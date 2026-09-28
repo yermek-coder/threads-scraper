@@ -1,5 +1,6 @@
 """Keyword polling and persistence for discovered Threads posts."""
 
+import asyncio
 import logging
 import time
 import uuid
@@ -31,9 +32,10 @@ from app.services.threads_post_parser import (
     parse_api_post,
     sanitized_search_engagement,
 )
-from app.services.threads_web_client import discover_keyword_posts
+from app.services.threads_web_client import DiscoveryResult, discover_keyword_posts
 
 logger = logging.getLogger(__name__)
+_poll_lock = asyncio.Lock()
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -93,6 +95,7 @@ async def collect_keyword(
     keyword: Keyword,
     notify: bool = True,
     notification_batch: list[int] | None = None,
+    search_sections: tuple[str, ...] = ("recent",),
 ) -> dict[str, int | bool | str | None]:
     """Fetch, filter, de-duplicate, and persist one keyword's latest results."""
     run_id = uuid.uuid4().hex
@@ -103,6 +106,7 @@ async def collect_keyword(
         "keyword_id": keyword.id,
         "keyword": keyword.phrase,
         "notify": notify,
+        "search_sections": search_sections,
     }
     try:
         method = str(await get_setting(db, "threads_collection_method") or "web")
@@ -120,6 +124,7 @@ async def collect_keyword(
             run_id=run_id,
             notify=notify,
             notification_batch=notification_batch,
+            search_sections=search_sections,
         )
     except Exception as error:
         log_event(
@@ -153,16 +158,53 @@ async def _collect_keyword_run(
     run_id: str,
     notify: bool,
     notification_batch: list[int] | None,
+    search_sections: tuple[str, ...],
 ) -> dict[str, int | bool | str | None]:
     """Run collection after the public wrapper establishes a log correlation ID."""
+    if not search_sections or any(
+        section not in {"recent", "top"} for section in search_sections
+    ):
+        raise ValueError("Unknown Threads search sections")
     if method == "api":
-        api_records = await search_keyword(db, keyword.phrase)
+        records_by_id: dict[str, dict[str, Any]] = {}
+        for section in search_sections:
+            records = (
+                await search_keyword(db, keyword.phrase)
+                if section == "recent"
+                else await search_keyword(db, keyword.phrase, section=section)
+            )
+            for item in records:
+                records_by_id[str(item.get("id"))] = item
+        api_records = list(records_by_id.values())
         extractions = [parse_api_post(item) for item in api_records]
         scanned = len(api_records)
         discovery_complete = True
         discovery_reason = None
     elif method == "web":
-        discovery = await discover_keyword_posts(db, keyword.phrase)
+        discoveries = []
+        for section in search_sections:
+            discoveries.append(
+                await discover_keyword_posts(db, keyword.phrase)
+                if section == "recent"
+                else await discover_keyword_posts(db, keyword.phrase, section=section)
+            )
+        posts_by_id: dict[str, DiscoveredPost] = {}
+        captured: dict[str, PostExtraction] = {}
+        for result in discoveries:
+            posts_by_id.update((post.post_id, post) for post in result.posts)
+            for post_id, extraction in result.extractions.items():
+                if post_id not in captured or extraction.confirmed:
+                    captured[post_id] = extraction
+        discovery = DiscoveryResult(
+            posts=list(posts_by_id.values()),
+            extractions=captured,
+            complete=all(result.complete for result in discoveries),
+            rounds=sum(result.rounds for result in discoveries),
+            reason="; ".join(
+                dict.fromkeys(result.reason for result in discoveries if result.reason)
+            )
+            or None,
+        )
         scanned = len(discovery.posts)
         discovery_complete = discovery.complete
         discovery_reason = discovery.reason
@@ -347,7 +389,8 @@ async def _collect_keyword_run(
     if affected_post_ids:
         await recalculate_post_filter_state(db, affected_post_ids, run_id=run_id)
 
-    keyword.last_polled_at = datetime.now(timezone.utc)
+    if "recent" in search_sections:
+        keyword.last_polled_at = datetime.now(timezone.utc)
     await db.commit()
     deliverable = [
         post for post in saved_posts
@@ -492,24 +535,44 @@ async def collect_keyword_id(keyword_id: int, notify: bool = True) -> dict[str, 
         keyword = await db.get(Keyword, keyword_id)
         if keyword is None:
             raise LookupError("Keyword not found")
-        return await collect_keyword(db, keyword, notify=notify)
+        return await collect_keyword(db, keyword, notify=notify, search_sections=("recent", "top"))
 
 
-async def poll_active_keywords() -> None:
+async def poll_active_keywords(search_sections: tuple[str, ...] = ("recent",)) -> None:
+    """Serialize scheduled batches so Recent and Top do not race on inserts."""
+    async with _poll_lock:
+        await _poll_active_keywords(search_sections)
+
+
+async def _poll_active_keywords(search_sections: tuple[str, ...]) -> None:
     """Scheduled job that polls each currently active keyword independently."""
     async with SessionFactory() as db:
         collection_method = await get_setting(db, "threads_collection_method") or "web"
-        if collection_method == "api" and not await get_setting(db, "threads_access_token"):
-            logger.info("Scheduled Threads collection skipped: access token is not configured")
+        if collection_method == "api" and not await get_setting(
+            db, "threads_access_token"
+        ):
+            logger.info(
+                "Scheduled Threads collection skipped: access token is not configured"
+            )
             return
-        keyword_ids = list((await db.scalars(select(Keyword.id).where(Keyword.is_active.is_(True)))).all())
+        keyword_ids = list(
+            (
+                await db.scalars(select(Keyword.id).where(Keyword.is_active.is_(True)))
+            ).all()
+        )
         notification_batch: list[int] = []
         for keyword_id in keyword_ids:
             try:
                 keyword = await db.get(Keyword, keyword_id)
                 if keyword is None or not keyword.is_active:
                     continue
-                await collect_keyword(db, keyword, notify=False, notification_batch=notification_batch)
+                await collect_keyword(
+                    db,
+                    keyword,
+                    notify=False,
+                    notification_batch=notification_batch,
+                    search_sections=search_sections,
+                )
             except Exception:
                 await db.rollback()
                 logger.exception("Scheduled Threads collection failed for keyword id %s", keyword_id)

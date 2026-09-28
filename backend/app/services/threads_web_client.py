@@ -29,7 +29,7 @@ from app.services.threads_post_parser import (
 
 logger = logging.getLogger(__name__)
 _SESSION_KEY = "threads_web_storage_state"
-_SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default&filter=recent"
+_SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default&filter={section}"
 _MAX_SEARCH_SCROLL_ROUNDS = 60
 _MAX_DISCOVERED_POSTS = 250
 _MAX_POST_FETCHES_PER_RUN = 100
@@ -575,17 +575,23 @@ def _search_failed_result(
     )
 
 
-async def discover_keyword_posts(db: AsyncSession, phrase: str) -> DiscoveryResult:
+async def discover_keyword_posts(
+    db: AsyncSession, phrase: str, section: str = "recent"
+) -> DiscoveryResult:
     """Capture and parse identity-matched search cards as the feed scrolls."""
+    if section not in {"recent", "top"}:
+        raise ValueError("Unknown Threads search section")
     try:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
     except ImportError as exc:
-        raise ThreadsCollectionError("Playwright is not installed in the backend runtime") from exc
+        raise ThreadsCollectionError(
+            "Playwright is not installed in the backend runtime"
+        ) from exc
 
     async with _browser_lock:
         context = None
         try:
-            target_url = _SEARCH_URL.format(query=quote_plus(phrase))
+            target_url = _SEARCH_URL.format(query=quote_plus(phrase), section=section)
             context = await _new_search_context(db)
             page = await context.new_page()
             response = await page.goto(

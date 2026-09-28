@@ -15,7 +15,7 @@ The initial database schema is created with SQLAlchemy `create_all`. For future 
 
 ## Threads collection
 
-Collection uses only the Recent search tab (`serp_type=default&filter=recent`); the API collector likewise requests `RECENT`. It captures each bounded post card directly on the Threads search page while scrolling. Threads virtualizes the feed, so cards can disappear from the DOM as soon as they leave the viewport. Each captured card must have a canonical permalink, matching author profile link, and a separable body region before its text is accepted. The earlier ten-ancestor/first-`span[dir=auto]` selector is not used: it could select an author name or a neighboring result. A card with a "See more" control is marked incomplete because its visible text may be truncated.
+Scheduled collection uses Recent at the configured polling interval and Top every six hours, with separate timers. Manual collection of one or all active keywords always searches both sections. Web search uses `serp_type=default&filter=recent` or `filter=top`; the API requests `RECENT` or `TOP`. Results are merged by post ID before ingestion and notifications. The first scheduled Top run is six hours after backend startup; manual collection does not reset that timer. It captures each bounded post card directly on the Threads search page while scrolling. Threads virtualizes the feed, so cards can disappear from the DOM as soon as they leave the viewport. Each captured card must have a canonical permalink, matching author profile link, and a separable body region before its text is accepted. The earlier ten-ancestor/first-`span[dir=auto]` selector is not used: it could select an author name or a neighboring result. A card with a "See more" control is marked incomplete because its visible text may be truncated.
 
 The observed `useBarcelonaBatchedDynamicPostCountsSubscriptionQuery` response had IDs and counts but no body text, and the page's inline scheduler JSON did not provide a verified stable object with ID, author, and full content. Search-card HTML is parsed using the same identity and nested-content checks as direct post pages. If ID, author, header, and body structure do not agree, extraction is reported as incomplete or unknown rather than storing arbitrary page text. A reply whose own text cannot be separated from reply context is rejected explicitly. Direct permalink visits remain available for the separate legacy recovery command.
 
@@ -63,7 +63,7 @@ PYTHONPATH=backend python -m unittest discover -s backend/tests -v
 
 The final relevance check can use Jev through OpenRouter. Save an OpenRouter API key in **Settings → Threads → Фильтр релевантности Jev** (or set `OPENROUTER_API_KEY` in the backend environment), enable the filter, and edit its instruction there. Jev checks each non-duplicate post against the keyword that found it. If OpenRouter is unavailable, collection keeps the existing deterministic relevance result.
 
-Web search uses the Recent tab. When one search result displays a conversation,
+Web search supports the Recent and Top tabs. When one search result displays a conversation,
 the collector keeps each post's own text and engagement separately and stores
 verified preceding post bodies in `raw_data.conversation_context`. It links only
 cards inside the same `threads_search_results_*` pagelet, excluding nested quotes

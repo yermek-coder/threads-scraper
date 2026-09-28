@@ -132,6 +132,32 @@ class CollectorSearchPageTests(unittest.TestCase):
             self.recalculate_count = recalculate.await_count
             return result
 
+    def test_both_sections_save_shared_post_once(self) -> None:
+        candidate = _candidate(likes=12, replies=3, reposts=4)
+        discovery = DiscoveryResult([candidate], {candidate.post_id: _extraction(candidate)}, True, 1)
+        with (
+            patch("app.services.collector.get_setting", new_callable=AsyncMock, return_value="web"),
+            patch("app.services.collector.discover_keyword_posts", new_callable=AsyncMock, return_value=discovery) as discover,
+            patch("app.services.collector.recalculate_post_filter_state", new_callable=AsyncMock),
+            patch("app.services.collector.send_posts", new_callable=AsyncMock) as send,
+        ):
+            result = asyncio.run(collect_keyword(self.db, self.keyword, search_sections=("recent", "top")))
+            self.assertEqual(discover.await_count, 2)
+            self.assertEqual(discover.await_args.kwargs, {"section": "top"})
+            self.assertEqual(result["saved"], 1)
+            self.assertEqual(result["scanned"], 1)
+            self.assertEqual(self.session.query(Post).count(), 1)
+            self.assertEqual(send.await_count, 1)
+
+    def test_top_only_collects_top(self) -> None:
+        discovery = DiscoveryResult([], {}, True, 1)
+        with (
+            patch("app.services.collector.get_setting", new_callable=AsyncMock, return_value="web"),
+            patch("app.services.collector.discover_keyword_posts", new_callable=AsyncMock, return_value=discovery) as discover,
+        ):
+            asyncio.run(collect_keyword(self.db, self.keyword, search_sections=("top",)))
+            discover.assert_awaited_once_with(self.db, self.keyword.phrase, section="top")
+
     def test_new_post_uses_search_card_text_and_engagement(self) -> None:
         candidate = _candidate(likes=12, replies=3, reposts=4)
         discovery = DiscoveryResult([candidate], {candidate.post_id: _extraction(candidate)}, False, 2, "stable")

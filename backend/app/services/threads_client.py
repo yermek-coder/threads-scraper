@@ -38,15 +38,19 @@ def _base_url() -> str:
     return config.threads_api_base_url.rstrip("/")
 
 
-async def search_keyword(db: AsyncSession, phrase: str) -> list[dict[str, Any]]:
+async def search_keyword(
+    db: AsyncSession, phrase: str, section: str = "recent"
+) -> list[dict[str, Any]]:
     """Search recent public posts for a phrase using Threads keyword_search."""
+    if section not in {"recent", "top"}:
+        raise ValueError("Unknown Threads search section")
     token = await get_setting(db, "threads_access_token")
     if not isinstance(token, str) or not token:
         raise ThreadsAPIError("Threads access token is not configured")
     await _reserve_daily_call(db)
     params = {
         "q": phrase,
-        "search_type": "RECENT",
+        "search_type": section.upper(),
         "search_mode": "KEYWORD",
         "fields": "id,text,username,permalink,timestamp,like_count,reply_count,has_replies,is_reply",
         "limit": "50",
