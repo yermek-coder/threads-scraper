@@ -115,6 +115,19 @@ async def apply_post_filters(
         "keyword_id": post.matched_keyword_id,
         "keyword": keyword,
     }
+    if not post.text.strip():
+        post.is_relevant = False
+        post.is_duplicate = False
+        post.duplicate_of_id = None
+        log_event(
+            logger,
+            logging.INFO,
+            "relevance.filter_applied",
+            **log_fields,
+            stage="no_text",
+            decision=False,
+        )
+        return post
     if extraction_diagnostic(post.raw_data, post.threads_post_id).get("status") not in CONFIRMED_STATUSES:
         post.is_relevant = True
         post.is_duplicate = False
@@ -439,11 +452,11 @@ async def recalculate_post_filter_state(
         elif extraction_status in CONFIRMED_STATUSES:
             post.is_duplicate = False
             post.duplicate_of_id = None
-            post.is_relevant = True
+            post.is_relevant = bool(post.text.strip())
         else:
             post.is_duplicate = False
             post.duplicate_of_id = None
-            post.is_relevant = True
+            post.is_relevant = bool(post.text.strip())
 
     relevance_targets: list[tuple[Post, str]] = []
     for post_id in changed_relevance_ids:
@@ -469,6 +482,10 @@ async def recalculate_post_filter_state(
             "keyword": phrase or "",
         }
         extraction_status = extraction_diagnostic(post.raw_data, post.threads_post_id).get("status")
+        if not post.text.strip():
+            post.is_relevant = False
+            log_event(logger, logging.INFO, "relevance.filter_applied", **log_fields, stage="no_text", decision=False)
+            continue
         if extraction_status != "success":
             log_event(
                 logger,
@@ -604,7 +621,6 @@ async def _reprocess_recent_posts_for_relevance(run_id: str, started: float) -> 
                 .join(Keyword, Keyword.id == Post.matched_keyword_id)
                 .where(
                     Post.is_duplicate.is_(False),
-                    Post.text != "",
                     func.coalesce(Post.post_timestamp, Post.created_at) >= cutoff,
                 )
                 .order_by(func.coalesce(Post.post_timestamp, Post.created_at).desc())
@@ -632,6 +648,10 @@ async def _reprocess_recent_posts_for_relevance(run_id: str, started: float) -> 
             batch = rows[start : start + JEV_REPROCESS_CONCURRENCY]
             needs_jev: list[tuple[Post, str]] = []
             for post, phrase in batch:
+                if not post.text.strip():
+                    post.is_relevant = False
+                    checked += 1
+                    continue
                 matched_stop_word = _matched_stop_word(post.text, context.stop_words)
                 if matched_stop_word is not None:
                     post.is_relevant = False

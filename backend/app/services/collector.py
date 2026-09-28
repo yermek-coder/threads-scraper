@@ -67,6 +67,7 @@ def post_from_api(item: dict[str, Any], keyword_id: int | None) -> Post | None:
         likes_count=extraction.likes_count,
         replies_count=extraction.replies_count,
         matched_keyword_id=keyword_id,
+        is_relevant=bool(extraction.confirmed and (extraction.text or "").strip()),
         raw_data={"source": extraction.source, "extraction": extraction.diagnostic()},
     )
 
@@ -395,6 +396,7 @@ def _new_post(extraction: PostExtraction, keyword_id: int) -> Post:
         likes_count=extraction.likes_count,
         replies_count=extraction.replies_count,
         matched_keyword_id=keyword_id,
+        is_relevant=bool(extraction.confirmed and (extraction.text or "").strip()),
         raw_data={"source": extraction.source, "extraction": extraction.diagnostic()},
     )
 
@@ -432,8 +434,8 @@ def _apply_confirmed_extraction(post: Post, extraction: PostExtraction) -> None:
     if extraction.source == "threads_graph_api":
         post.likes_count = extraction.likes_count
         post.replies_count = extraction.replies_count
-    if extraction.status == ExtractionStatus.NO_TEXT:
-        post.is_relevant = True
+    if not post.text.strip():
+        post.is_relevant = False
         post.is_duplicate = False
         post.duplicate_of_id = None
     raw_data = add_extraction_diagnostic(post.raw_data, extraction)
@@ -447,7 +449,7 @@ def _apply_unconfirmed_extraction(post: Post, extraction: PostExtraction) -> Non
         post.author_username = extraction.username
     if extraction.permalink:
         post.permalink = extraction.permalink
-    post.is_relevant = True
+    post.is_relevant = False
     post.is_duplicate = False
     post.duplicate_of_id = None
     raw_data = add_extraction_diagnostic(post.raw_data, extraction)
