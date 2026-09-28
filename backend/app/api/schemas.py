@@ -1,7 +1,7 @@
 """Pydantic request and response models."""
 
-from datetime import datetime
 import json
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -82,6 +82,15 @@ class StopWordRead(BaseModel):
     created_at: datetime
 
 
+class ConversationPostRead(BaseModel):
+    """A verified preceding post displayed alongside a collected reply."""
+
+    post_id: str
+    username: str
+    permalink: str
+    text: str
+
+
 class PostRead(BaseModel):
     id: int
     threads_post_id: str
@@ -100,6 +109,7 @@ class PostRead(BaseModel):
     is_read: bool
     raw_data: dict[str, Any]
     created_at: datetime
+    conversation_context: list[ConversationPostRead] = Field(default_factory=list)
     extraction_status: str = "legacy_unverified"
     extraction_source: str = "unknown"
     extraction_parser_version: str = "legacy"

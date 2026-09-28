@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.threads_post_parser import ExtractionStatus, SEARCH_DOM_SOURCE
+from app.services.threads_post_parser import SEARCH_DOM_SOURCE, ExtractionStatus
 from app.services.threads_web_client import (
     _SEARCH_DISCOVERY_SCRIPT,
     _SEARCH_STATE_CHANGED_SCRIPT,
@@ -99,6 +99,112 @@ class SearchCardBrowserTests(unittest.TestCase):
         self.assertEqual(extractions["Main"].text, "Own full text 🧵")
         self.assertEqual(extractions["Main"].source, SEARCH_DOM_SOURCE)
         self.assertNotIn("Quoted", found)
+
+    def test_search_result_preserves_reply_context_without_merging_bodies(self) -> None:
+        state = self._render(
+            '<div data-pagelet="threads_search_results_0">'
+            + card("Parent", text="Parent topic", likes="677")
+            + card("Reply", text="Own reply", likes="1")
+            + "</div>"
+        )
+        found, extractions = {}, {}
+        _merge_search_cards(found, extractions, state)
+        self.assertEqual(set(found), {"Parent", "Reply"})
+        self.assertIsNone(extractions["Parent"].conversation_context)
+        self.assertEqual(extractions["Reply"].text, "Own reply")
+        self.assertEqual(extractions["Reply"].likes_count, 1)
+        self.assertEqual(
+            extractions["Reply"].conversation_context,
+            [
+                {
+                    "post_id": "Parent",
+                    "username": "author",
+                    "permalink": "https://www.threads.com/@author/post/Parent",
+                    "text": "Parent topic",
+                }
+            ],
+        )
+        self.assertNotIn("Quoted", found)
+
+    def test_adjacent_search_results_are_not_reply_context(self) -> None:
+        state = self._render(
+            '<div data-pagelet="threads_search_results_0">'
+            + card("First", text="First")
+            + "</div>",
+            '<div data-pagelet="threads_search_results_1">'
+            + card("Second", text="Second")
+            + "</div>",
+        )
+        found, extractions = {}, {}
+        _merge_search_cards(found, extractions, state)
+        self.assertTrue(
+            all(p.conversation_context is None for p in extractions.values())
+        )
+
+    def test_multiple_displayed_ancestors_keep_order(self) -> None:
+        state = self._render(
+            '<div data-pagelet="threads_search_results_0">'
+            + card("Root", text="Root")
+            + card("Parent", text="Parent")
+            + card("Reply", text="Reply")
+            + "</div>"
+        )
+        found, extractions = {}, {}
+        _merge_search_cards(found, extractions, state)
+        self.assertEqual(
+            [p["post_id"] for p in extractions["Reply"].conversation_context],
+            ["Root", "Parent"],
+        )
+
+    def test_truncated_parent_is_not_used_as_verified_context(self) -> None:
+        state = self._render(
+            '<div data-pagelet="threads_search_results_0">'
+            + card("Parent", text="Visible prefix", more=True)
+            + card("Reply", text="Reply")
+            + "</div>"
+        )
+        found, extractions = {}, {}
+        _merge_search_cards(found, extractions, state)
+        self.assertEqual(extractions["Reply"].status, ExtractionStatus.SUCCESS)
+        self.assertIsNone(extractions["Reply"].conversation_context)
+
+    def test_context_survives_later_standalone_observation(self) -> None:
+        found, extractions = {}, {}
+        _merge_search_cards(
+            found,
+            extractions,
+            self._render(
+                '<div data-pagelet="threads_search_results_0">'
+                + card("Parent", text="Parent")
+                + card("Reply", text="Reply")
+                + "</div>"
+            ),
+        )
+        _merge_search_cards(
+            found, extractions, self._render(card("Reply", text="Reply", likes="2"))
+        )
+        self.assertEqual(
+            extractions["Reply"].conversation_context[0]["post_id"], "Parent"
+        )
+        self.assertEqual(extractions["Reply"].likes_count, 2)
+
+    def test_oracle_conversation_fixture_keeps_parent_and_reply_separate(self) -> None:
+        html = (
+            Path(__file__).parent / "fixtures/threads/search_conversation.html"
+        ).read_text()
+        state = self._render(html)
+        found, extractions = {}, {}
+        _merge_search_cards(found, extractions, state)
+        self.assertEqual(set(found), {"RootPost", "ReplyPost"})
+        reply = extractions["ReplyPost"]
+        root = extractions["RootPost"]
+        self.assertEqual(reply.status, ExtractionStatus.SUCCESS)
+        self.assertEqual(root.status, ExtractionStatus.SUCCESS)
+        self.assertIn("Сейчас собираюсь подавать в суд", reply.text)
+        self.assertNotIn("И вот 5 вещей", reply.text)
+        self.assertEqual(reply.conversation_context[0]["text"], root.text)
+        self.assertEqual(reply.conversation_context[0]["post_id"], "RootPost")
+        self.assertEqual((root.likes_count, reply.likes_count), (677, 1))
 
     def test_permalink_does_not_need_to_wrap_timestamp(self) -> None:
         html = card("DetachedTime", text="Text survives detached timestamp")

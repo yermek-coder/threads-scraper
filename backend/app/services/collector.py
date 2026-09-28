@@ -4,7 +4,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -21,13 +21,13 @@ from app.services.threads_discovery import DiscoveredPost
 from app.services.threads_errors import ThreadsCollectionError
 from app.services.threads_post_parser import (
     CONFIRMED_STATUSES,
-    ExtractionStatus,
-    PostExtraction,
     SEARCH_DOM_SOURCE,
     SEARCH_PARSER_VERSION,
+    ExtractionStatus,
+    PostExtraction,
     add_extraction_diagnostic,
-    extraction_is_currently_confirmed,
     extraction_diagnostic,
+    extraction_is_currently_confirmed,
     parse_api_post,
     sanitized_search_engagement,
 )
@@ -60,7 +60,11 @@ def post_from_api(item: dict[str, Any], keyword_id: int | None) -> Post | None:
         return None
     return Post(
         threads_post_id=extraction.post_id,
-        text=extraction.text if extraction.confirmed and extraction.text is not None else "",
+        text=(
+            extraction.text
+            if extraction.confirmed and extraction.text is not None
+            else ""
+        ),
         author_username=extraction.username,
         permalink=extraction.permalink,
         post_timestamp=parse_timestamp(extraction.timestamp),
@@ -68,7 +72,11 @@ def post_from_api(item: dict[str, Any], keyword_id: int | None) -> Post | None:
         replies_count=extraction.replies_count,
         matched_keyword_id=keyword_id,
         is_relevant=bool(extraction.confirmed and (extraction.text or "").strip()),
-        raw_data={"source": extraction.source, "extraction": extraction.diagnostic()},
+        raw_data={
+            "source": extraction.source,
+            "extraction": extraction.diagnostic(),
+            "conversation_context": extraction.conversation_context or [],
+        },
     )
 
 
@@ -90,7 +98,7 @@ async def collect_keyword(
     run_id = uuid.uuid4().hex
     started = time.perf_counter()
     method = "unknown"
-    log_fields = {
+    log_fields: dict[str, Any] = {
         "run_id": run_id,
         "keyword_id": keyword.id,
         "keyword": keyword.phrase,
@@ -132,7 +140,7 @@ async def collect_keyword(
         **log_fields,
         method=method,
         duration_ms=round((time.perf_counter() - started) * 1000),
-        **result,
+        **cast(dict[str, Any], result),
     )
     return result
 
@@ -175,8 +183,19 @@ async def _collect_keyword_run(
             )
         existing_rows = await _load_existing_posts(db, [candidate.post_id for candidate in discovery.posts])
         candidates_to_extract = [
-            candidate for candidate in discovery.posts
-            if not _is_confirmed(existing_rows.get(candidate.post_id), candidate.post_id)
+            candidate
+            for candidate in discovery.posts
+            if not _is_confirmed(
+                existing_rows.get(candidate.post_id), candidate.post_id
+            )
+            or (
+                discovery.extractions.get(candidate.post_id) is not None
+                and discovery.extractions[candidate.post_id].conversation_context
+                and discovery.extractions[candidate.post_id].conversation_context
+                != (existing_rows[candidate.post_id].raw_data or {}).get(
+                    "conversation_context", []
+                )
+            )
         ]
         extractions = [
             _search_extraction(candidate, discovery.extractions.get(candidate.post_id))
@@ -227,11 +246,13 @@ async def _collect_keyword_run(
                 post.threads_post_id,
             )
             previous_text = post.text
+            previous_context = (post.raw_data or {}).get("conversation_context", [])
             if extraction.confirmed:
                 _apply_confirmed_extraction(post, extraction)
                 content_changed = (
                     not was_currently_confirmed
                     or previous_text != (extraction.text or "")
+                    or previous_context != (extraction.conversation_context or [])
                     or extraction.status.value != current.get("status")
                 )
                 if content_changed:
@@ -397,7 +418,11 @@ def _new_post(extraction: PostExtraction, keyword_id: int) -> Post:
         replies_count=extraction.replies_count,
         matched_keyword_id=keyword_id,
         is_relevant=bool(extraction.confirmed and (extraction.text or "").strip()),
-        raw_data={"source": extraction.source, "extraction": extraction.diagnostic()},
+        raw_data={
+            "source": extraction.source,
+            "extraction": extraction.diagnostic(),
+            "conversation_context": extraction.conversation_context or [],
+        },
     )
 
 
@@ -440,6 +465,8 @@ def _apply_confirmed_extraction(post: Post, extraction: PostExtraction) -> None:
         post.duplicate_of_id = None
     raw_data = add_extraction_diagnostic(post.raw_data, extraction)
     raw_data["source"] = extraction.source
+    if extraction.source == SEARCH_DOM_SOURCE:
+        raw_data["conversation_context"] = extraction.conversation_context or []
     post.raw_data = raw_data
 
 
@@ -454,6 +481,8 @@ def _apply_unconfirmed_extraction(post: Post, extraction: PostExtraction) -> Non
     post.duplicate_of_id = None
     raw_data = add_extraction_diagnostic(post.raw_data, extraction)
     raw_data["source"] = extraction.source
+    if extraction.source == SEARCH_DOM_SOURCE:
+        raw_data["conversation_context"] = extraction.conversation_context or []
     post.raw_data = raw_data
 
 

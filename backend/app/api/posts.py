@@ -4,15 +4,18 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import BigInteger, String, and_, case, cast, delete, func, or_, select
-from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql.functions import FunctionElement
 
-from app.api.schemas import PostPage, PostRead, PostStatusUpdate
+from app.api.schemas import ConversationPostRead, PostPage, PostRead, PostStatusUpdate
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models import Keyword, Post
-from app.services.threads_post_parser import extraction_diagnostic
+from app.services.threads_post_parser import (
+    extraction_diagnostic,
+    sanitized_conversation_context,
+)
 
 router = APIRouter(prefix="/posts", tags=["posts"], dependencies=[Depends(get_current_user)])
 DbDep = Annotated[AsyncSession, Depends(get_db)]
@@ -105,18 +108,34 @@ def _post_read(post: Post, phrase: str | None) -> PostRead:
         is_read=post.is_read,
         raw_data=safe_raw_data,
         created_at=post.created_at,
+        conversation_context=(
+            [
+                ConversationPostRead(**entry)
+                for entry in sanitized_conversation_context(
+                    post.raw_data, post.threads_post_id
+                )
+            ]
+            if status_value == "success"
+            else []
+        ),
         extraction_status=status_value,
         extraction_source=str(diagnostic.get("source") or "unknown"),
         extraction_parser_version=str(diagnostic.get("parser_version") or "legacy"),
-        extraction_reason=diagnostic.get("reason") if isinstance(diagnostic.get("reason"), str) else None,
+        extraction_reason=(
+            diagnostic.get("reason")
+            if isinstance(diagnostic.get("reason"), str)
+            else None
+        ),
         extraction_last_attempt_status=(
             str(last_attempt.get("status"))
-            if isinstance(last_attempt, dict) and isinstance(last_attempt.get("status"), str)
+            if isinstance(last_attempt, dict)
+            and isinstance(last_attempt.get("status"), str)
             else None
         ),
         extraction_last_attempt_reason=(
             last_attempt.get("reason")
-            if isinstance(last_attempt, dict) and isinstance(last_attempt.get("reason"), str)
+            if isinstance(last_attempt, dict)
+            and isinstance(last_attempt.get("reason"), str)
             else None
         ),
     )

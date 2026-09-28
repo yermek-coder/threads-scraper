@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote_plus, unquote, urlparse
 
@@ -18,12 +18,12 @@ from app.services.threads_discovery import (
 )
 from app.services.threads_errors import ThreadsCollectionError
 from app.services.threads_post_parser import (
-    ExtractionStatus,
-    PostExtraction,
-    POST_DOM_SOURCE,
     PARSER_VERSION,
+    POST_DOM_SOURCE,
     SEARCH_DOM_SOURCE,
     SEARCH_PARSER_VERSION,
+    ExtractionStatus,
+    PostExtraction,
     parse_post_card_html,
 )
 
@@ -170,6 +170,16 @@ _SEARCH_DISCOVERY_SCRIPT = r"""() => {
       if (!key) continue;
       const value = readCount(control.innerText);
       if (Number.isSafeInteger(value) && value >= 0) post[key] = value;
+    }
+    // A Threads search pagelet is one result, which may contain a displayed
+    // ancestor followed by replies. Never infer this relationship across pagelets
+    // or from nested quote cards (excluded from `cards` above).
+    const result = card.closest('[data-pagelet^="threads_search_results_"]');
+    if (result) {
+      const preceding = cards.filter((other) => other !== card
+        && other.closest('[data-pagelet^="threads_search_results_"]') === result
+        && Boolean(other.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING));
+      post.conversation_post_ids = preceding.map((other) => identity(ownPostAnchor(other).href).id);
     }
     post.html = clone.outerHTML;
     post.timestamp = time?.getAttribute('datetime') || null;
@@ -455,6 +465,7 @@ def _merge_search_cards(
     items = state.get("posts")
     new_count = merge_discovery_batch(found, items)
     assert isinstance(items, list)
+    batch_extractions: dict[str, PostExtraction] = {}
     for item in items:
         candidate = found[item["id"]]
         html = item.get("html")
@@ -485,7 +496,37 @@ def _merge_search_cards(
                 )
         parsed.likes_count = candidate.likes_count or 0
         parsed.replies_count = candidate.replies_count or 0
+        batch_extractions[candidate.post_id] = parsed
+
+    for item in items:
+        candidate = found[item["id"]]
+        parsed = batch_extractions[candidate.post_id]
+        context_ids = item.get("conversation_post_ids")
+        if isinstance(context_ids, list) and context_ids:
+            # Use this observation's verified full bodies, not cached unrelated
+            # cards or prefixes hidden behind a "more" button.
+            ancestors = [
+                batch_extractions.get(post_id)
+                for post_id in context_ids
+                if isinstance(post_id, str) and post_id != candidate.post_id
+            ]
+            if len(ancestors) == len(context_ids) and all(
+                ancestor is not None and ancestor.status == ExtractionStatus.SUCCESS
+                for ancestor in ancestors
+            ):
+                parsed.conversation_context = [
+                    {
+                        "post_id": ancestor.post_id,
+                        "username": ancestor.username,
+                        "permalink": ancestor.permalink,
+                        "text": ancestor.text or "",
+                    }
+                    for ancestor in ancestors
+                    if ancestor is not None
+                ]
         previous = extractions.get(candidate.post_id)
+        if previous is not None and not parsed.conversation_context:
+            parsed.conversation_context = previous.conversation_context
         priority = {
             ExtractionStatus.SUCCESS: 3,
             ExtractionStatus.NO_TEXT: 2,
@@ -494,11 +535,21 @@ def _merge_search_cards(
             ExtractionStatus.UNAVAILABLE: 0,
         }
         if previous is None or (
-            (priority.get(parsed.status, 0), len(parsed.text or ""))
-            > (priority.get(previous.status, 0), len(previous.text or ""))
+            (
+                priority.get(parsed.status, 0),
+                len(parsed.text or ""),
+                bool(parsed.conversation_context),
+            )
+            > (
+                priority.get(previous.status, 0),
+                len(previous.text or ""),
+                bool(previous.conversation_context),
+            )
         ):
             extractions[candidate.post_id] = parsed
         elif previous is not None:
+            if parsed.conversation_context and parsed.text == previous.text:
+                previous.conversation_context = parsed.conversation_context
             previous.likes_count = candidate.likes_count or 0
             previous.replies_count = candidate.replies_count or 0
     return new_count

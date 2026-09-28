@@ -63,6 +63,20 @@ PYTHONPATH=backend python -m unittest discover -s backend/tests -v
 
 The final relevance check can use Jev through OpenRouter. Save an OpenRouter API key in **Settings → Threads → Фильтр релевантности Jev** (or set `OPENROUTER_API_KEY` in the backend environment), enable the filter, and edit its instruction there. Jev checks each non-duplicate post against the keyword that found it. If OpenRouter is unavailable, collection keeps the existing deterministic relevance result.
 
+Web search uses the Recent tab. When one search result displays a conversation,
+the collector keeps each post's own text and engagement separately and stores
+verified preceding post bodies in `raw_data.conversation_context`. It links only
+cards inside the same `threads_search_results_*` pagelet, excluding nested quotes
+and neighboring results. This is displayed conversation context, not a guarantee
+that the first card is the original thread root. Truncated or unconfirmed ancestor
+bodies are not supplied to Jev. Jev evaluates the reply itself with this context,
+using the configured prompt plus reply-specific guidance. A newly discovered or
+changed context rechecks an existing reply without sending another notification.
+The feed displays these preceding posts above the reply in one conversation card,
+with separate authors and source links. Review and selection actions apply to the
+collected reply. No additional post-page requests are needed. Older rows acquire context when they
+reappear in a search collection; database migrations are not required.
+
 Collection and relevance events are written to the backend container log as one-line JSON payloads after a stable event name. `run_id` correlates a keyword collection with its discovery, extraction, stop-word, duplicate, and Jev events. Jev records the model, prompt fingerprint, probability, threshold, final decision, latency, OpenRouter request/response IDs, usage, HTTP failures, and the fallback decision. Post text and API keys are not logged.
 
 Follow production backend logs from the repository directory with:

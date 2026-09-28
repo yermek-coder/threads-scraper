@@ -25,3 +25,10 @@ handling alone did not fix this case. The parser recognizes complete leading
 excludes them from the body. Unknown metadata remains unconfirmed; inline
 profile links remain body content. Browser regressions cover metadata with
 multiple body regions, metadata without a body, and inline mentions.
+
+`search_conversation.html` is reduced from the Oracle Recent search for
+`стоматолог усть-каменогорск` on 2026-09-28, matching the user's example.
+Authors, post IDs, and the clinic name are anonymized; media URLs and generated
+CSS classes are removed. The per-result `data-pagelet` boundary and separate
+post cards are preserved. This boundary supplies displayed ancestors only; it
+does not prove that every earlier card is the direct parent or the thread root.

@@ -10,6 +10,13 @@ export type Keyword = {
 
 export type StopWord = { id: number; word_or_phrase: string; created_at: string };
 
+export type ConversationPost = {
+  post_id: string;
+  username: string;
+  permalink: string;
+  text: string;
+};
+
 export type Post = {
   id: number;
   threads_post_id: string;
@@ -27,6 +34,7 @@ export type Post = {
   duplicate_of_id: number | null;
   is_read: boolean;
   created_at: string;
+  conversation_context: ConversationPost[];
   extraction_status: 'success' | 'no_text' | 'incomplete' | 'unavailable' | 'unknown_structure' | 'legacy_unverified';
   extraction_source: string;
   extraction_parser_version: string;

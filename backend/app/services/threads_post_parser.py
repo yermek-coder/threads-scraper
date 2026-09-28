@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from html.parser import HTMLParser
-import json
-import re
-from typing import Any, Callable, Iterator
+from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
 PARSER_VERSION = "threads-post-dom-v4"
 API_PARSER_VERSION = "threads-graph-api-v1"
 POST_DOM_SOURCE = "threads_post_dom"
 SEARCH_DOM_SOURCE = "threads_search_dom"
-SEARCH_PARSER_VERSION = "threads-search-dom-v3"
+SEARCH_PARSER_VERSION = "threads-search-dom-v4"
 API_SOURCE = "threads_graph_api"
 THREADS_HOSTS = frozenset({"threads.com", "www.threads.com", "threads.net", "www.threads.net"})
 
@@ -49,6 +50,7 @@ class PostExtraction:
     likes_count: int = 0
     replies_count: int = 0
     raw_record: dict[str, Any] | None = None
+    conversation_context: list[dict[str, str]] | None = None
 
     @property
     def confirmed(self) -> bool:
@@ -645,6 +647,40 @@ def extraction_is_currently_confirmed(raw_data: dict[str, Any] | None, post_id: 
     )
 
 
+def sanitized_conversation_context(
+    raw_data: dict[str, Any] | None,
+    post_id: str,
+) -> list[dict[str, str]]:
+    """Read identity-matched ancestor bodies without arbitrary raw metadata."""
+    if not isinstance(raw_data, dict):
+        return []
+    entries = raw_data.get("conversation_context")
+    if not isinstance(entries, list):
+        return []
+    result: list[dict[str, str]] = []
+    seen = {post_id}
+    for entry in entries:
+        fields = ("post_id", "username", "permalink", "text")
+        if not isinstance(entry, dict) or any(
+            not isinstance(entry.get(key), str) or not entry[key].strip()
+            for key in fields
+        ):
+            return []
+        host, parts = _absolute_path(entry["permalink"])
+        if (
+            host not in THREADS_HOSTS
+            or len(parts) != 3
+            or parts[0].casefold() != f"@{entry['username']}".casefold()
+            or parts[1] != "post"
+            or parts[2] != entry["post_id"]
+            or entry["post_id"] in seen
+        ):
+            return []
+        seen.add(entry["post_id"])
+        result.append({key: entry[key] for key in fields})
+    return result
+
+
 def sanitized_search_engagement(raw_data: dict[str, Any] | None) -> dict[str, int | None] | None:
     """Keep only validated, nonnegative search-card engagement counts."""
     if not isinstance(raw_data, dict) or not isinstance(raw_data.get("search_engagement"), dict):
@@ -669,7 +705,9 @@ def add_extraction_diagnostic(raw_data: dict[str, Any] | None, extraction: PostE
     attempted = extraction.diagnostic()
     search_engagement = sanitized_search_engagement(raw_data)
     if extraction.confirmed or current.get("status") not in CONFIRMED_STATUSES:
-        result = {"source": extraction.source, "extraction": attempted}
+        result: dict[str, Any] = {"source": extraction.source, "extraction": attempted}
+        if extraction.source == SEARCH_DOM_SOURCE:
+            result["conversation_context"] = extraction.conversation_context or []
         if search_engagement is not None:
             result["search_engagement"] = search_engagement
         return result
@@ -683,6 +721,9 @@ def add_extraction_diagnostic(raw_data: dict[str, Any] | None, extraction: PostE
         "extraction": previous,
         "extraction_last_attempt": attempted,
     }
+    saved_context = sanitized_conversation_context(raw_data, extraction.post_id)
+    if saved_context:
+        result["conversation_context"] = saved_context
     if search_engagement is not None:
         result["search_engagement"] = search_engagement
     return result

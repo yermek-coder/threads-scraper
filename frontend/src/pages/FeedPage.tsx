@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDownWideNarrow, ArrowLeft, ArrowRight, Check, ExternalLink, Heart, MessageCircle, MoreVertical, RefreshCw, Repeat2, RotateCcw, Search, Sparkles, Trash2 } from 'lucide-react';
 import { api, toQuery, userMessage } from '../api';
 import { Badge, Button, EmptyState, PageHeading, Select, Spinner, type Notice } from '../components';
-import type { CollectResult, Keyword, Post, PostPage } from '../types';
+import type { CollectResult, ConversationPost, Keyword, Post, PostPage } from '../types';
 
 type Props = { notify: (notice: Notice) => void; onGoToKeywords: () => void };
 
@@ -67,6 +67,32 @@ function PostActionsMenu({ post, busy, onDelete }: { post: Post; busy: boolean; 
   );
 }
 
+function ConversationContext({ posts }: { posts: ConversationPost[] }) {
+  if (posts.length === 0) return null;
+
+  return (
+    <div aria-label="Предыдущие посты в обсуждении">
+      {posts.map((parent) => (
+        <section key={parent.post_id} aria-label={`Пост @${parent.username}`} className="ml-7 flex gap-3 pb-5">
+          <div className="relative flex w-10 shrink-0 justify-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#eef2ed] text-sm font-bold text-[#51635a]" aria-hidden="true">
+              {parent.username.slice(0, 1).toUpperCase()}
+            </div>
+            <span className="absolute -bottom-5 top-12 w-px bg-[#d8dfe1]" aria-hidden="true" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <a href={parent.permalink} target="_blank" rel="noreferrer" className="inline-flex min-h-10 max-w-full items-center gap-2 font-semibold text-ink underline-offset-4 hover:underline" aria-label={`Открыть пост @${parent.username} в Threads`}>
+              <span className="break-all">@{parent.username}</span>
+              <ExternalLink className="h-3 w-3 shrink-0 text-[#607a47]" aria-hidden="true" />
+            </a>
+            <p className="mt-2 whitespace-pre-wrap break-words text-[14px] leading-6 text-[#55646a]">{parent.text}</p>
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function PostCard({
   post,
   matchedKeyword,
@@ -85,6 +111,7 @@ function PostCard({
   busy?: boolean;
 }) {
   const isSafeLink = Boolean(post.permalink && /^https?:\/\//i.test(post.permalink));
+  const conversationContext = post.extraction_status === 'success' ? post.conversation_context ?? [] : [];
   const extractionConfirmed = post.extraction_status === 'success' || post.extraction_status === 'no_text';
   const lastAttemptFailed = Boolean(
     post.extraction_last_attempt_status
@@ -94,6 +121,7 @@ function PostCard({
 
   return (
     <article className={`rounded-2xl border bg-white p-5 shadow-card transition sm:p-6 ${post.is_read ? 'border-[#e5e9ea]' : 'border-[#dce7cf] ring-1 ring-[#edf4e4]'}`}>
+      <ConversationContext posts={conversationContext} />
       <div className="flex items-start gap-3">
         <input
           type="checkbox"
@@ -109,9 +137,10 @@ function PostCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-3">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-              <span className="font-semibold text-ink">@{post.author_username || 'unknown'}</span>
+              <span className="break-all font-semibold text-ink">@{post.author_username || 'unknown'}</span>
               {!post.is_read && <span className="h-1.5 w-1.5 rounded-full bg-[#89b94e]" aria-label="Новый пост" />}
               <span className="text-xs text-[#89959a]">{formatDate(post.post_timestamp)}</span>
+              {conversationContext.length > 0 && <span className="text-xs font-medium text-[#607a47]">Ответ в обсуждении</span>}
             </div>
             <PostActionsMenu post={post} busy={busy} onDelete={onDelete} />
           </div>

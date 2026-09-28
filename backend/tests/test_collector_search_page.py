@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 import sys
-from types import TracebackType
-from typing import Any
 import unittest
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Self
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import ScalarResult, create_engine
@@ -20,10 +20,10 @@ from app.models import Keyword, Post
 from app.services.collector import collect_keyword
 from app.services.threads_discovery import DiscoveredPost
 from app.services.threads_post_parser import (
-    ExtractionStatus,
-    PostExtraction,
     SEARCH_DOM_SOURCE,
     SEARCH_PARSER_VERSION,
+    ExtractionStatus,
+    PostExtraction,
     add_extraction_diagnostic,
     extraction_is_currently_confirmed,
 )
@@ -37,7 +37,7 @@ class _NestedTransaction:
         self.session = session
         self.transaction: SessionTransaction | None = None
 
-    async def __aenter__(self) -> _NestedTransaction:
+    async def __aenter__(self) -> Self:
         self.transaction = self.session.begin_nested()
         self.transaction.__enter__()
         return self
@@ -148,6 +148,44 @@ class CollectorSearchPageTests(unittest.TestCase):
         )
         self.assertTrue(extraction_is_currently_confirmed(post.raw_data, candidate.post_id))
         self.assertEqual(self.recalculate_count, 1)
+
+    def test_context_only_change_rechecks_existing_confirmed_reply(self) -> None:
+        candidate = _candidate()
+        extraction = _extraction(candidate)
+        post = Post(
+            threads_post_id=candidate.post_id,
+            text=extraction.text,
+            author_username=candidate.username,
+            permalink=candidate.permalink,
+            raw_data={
+                "source": SEARCH_DOM_SOURCE,
+                "extraction": extraction.diagnostic(),
+            },
+            matched_keyword_id=self.keyword.id,
+        )
+        self.session.add(post)
+        self.session.commit()
+        extraction.conversation_context = [
+            {
+                "post_id": "Parent",
+                "username": "parent",
+                "text": "Parent topic",
+                "permalink": "https://www.threads.com/@parent/post/Parent",
+            }
+        ]
+        result = self.collect(
+            DiscoveryResult([candidate], {candidate.post_id: extraction}, True, 1)
+        )
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["saved"], 0)
+        self.assertEqual(
+            post.raw_data["conversation_context"], extraction.conversation_context
+        )
+        self.assertEqual(self.recalculate_count, 1)
+        self.collect(
+            DiscoveryResult([candidate], {candidate.post_id: extraction}, True, 1)
+        )
+        self.assertEqual(self.recalculate_count, 0)
 
     def test_confirmed_row_preserves_text_and_known_counts_when_card_omits_them(self) -> None:
         original = _candidate(likes=8, replies=6, reposts=4)
