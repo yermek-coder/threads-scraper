@@ -29,7 +29,7 @@ from app.services.threads_post_parser import (
 
 logger = logging.getLogger(__name__)
 _SESSION_KEY = "threads_web_storage_state"
-_SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default"
+_SEARCH_URL = "https://www.threads.com/search?q={query}&serp_type=default&filter=recent"
 _MAX_SEARCH_SCROLL_ROUNDS = 60
 _MAX_DISCOVERED_POSTS = 250
 _MAX_POST_FETCHES_PER_RUN = 100
