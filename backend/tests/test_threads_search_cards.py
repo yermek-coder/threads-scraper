@@ -206,7 +206,7 @@ class SearchCardBrowserTests(unittest.TestCase):
                 finally:
                     context.close()
 
-    def test_external_link_does_not_hide_ambiguous_reply_context(self) -> None:
+    def test_localized_reply_metadata_is_excluded_with_external_links(self) -> None:
         for label in ("Replying to", "В ответ"):
             with self.subTest(label=label):
                 html = card("ReplyContext", text="Own reply text")
@@ -218,9 +218,38 @@ class SearchCardBrowserTests(unittest.TestCase):
                 state = self._render(html)
                 found, extractions = {}, {}
                 _merge_search_cards(found, extractions, state)
-                self.assertEqual(extractions["ReplyContext"].status, ExtractionStatus.UNKNOWN_STRUCTURE)
-                self.assertEqual(extractions["ReplyContext"].reason,
-                                 "multiple_body_regions_include_ambiguous_reply_context")
+                self.assertEqual(extractions["ReplyContext"].status, ExtractionStatus.SUCCESS)
+                self.assertEqual(extractions["ReplyContext"].text, "Own reply text\nexample.com")
+
+    def test_multiline_body_with_profile_mention_is_preserved(self) -> None:
+        html = card("Mention", text="First paragraph")
+        html = html.replace('<div dir="auto">First paragraph</div>',
+                            '<div dir="auto">First paragraph</div>'
+                            '<div dir="auto">Thanks <a href="/@other"><span translate="no">@other</span></a>!</div>')
+        state = self._render(html)
+        found, extractions = {}, {}
+        _merge_search_cards(found, extractions, state)
+        self.assertEqual(extractions["Mention"].text, "First paragraph\nThanks @other!")
+
+    def test_reply_metadata_without_body_is_not_saved_as_post_text(self) -> None:
+        html = card("MetadataOnly", text='<span>В ответ <span translate="no">@original</span></span>')
+        # Remove the quote attachment: metadata alone cannot prove no_text.
+        html = html[:html.index('<div data-pressable-container="true">', 10)] + '</div>'
+        state = self._render(html)
+        found, extractions = {}, {}
+        _merge_search_cards(found, extractions, state)
+        self.assertEqual(extractions["MetadataOnly"].status, ExtractionStatus.UNKNOWN_STRUCTURE)
+        self.assertIsNone(extractions["MetadataOnly"].text)
+
+    def test_unknown_reply_metadata_is_not_combined_with_body(self) -> None:
+        html = card("UnknownReply", text="Own reply text")
+        html = html.replace('<div dir="auto">Own reply text</div>',
+                            '<span dir="auto">Unknown context <span translate="no">@original</span></span>'
+                            '<div dir="auto">Own reply text</div>')
+        state = self._render(html)
+        found, extractions = {}, {}
+        _merge_search_cards(found, extractions, state)
+        self.assertEqual(extractions["UnknownReply"].status, ExtractionStatus.UNKNOWN_STRUCTURE)
 
 
 if __name__ == "__main__":

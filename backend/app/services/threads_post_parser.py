@@ -7,14 +7,15 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from html.parser import HTMLParser
 import json
+import re
 from typing import Any, Callable, Iterator
 from urllib.parse import unquote, urljoin, urlparse
 
-PARSER_VERSION = "threads-post-dom-v3"
+PARSER_VERSION = "threads-post-dom-v4"
 API_PARSER_VERSION = "threads-graph-api-v1"
 POST_DOM_SOURCE = "threads_post_dom"
 SEARCH_DOM_SOURCE = "threads_search_dom"
-SEARCH_PARSER_VERSION = "threads-search-dom-v2"
+SEARCH_PARSER_VERSION = "threads-search-dom-v3"
 API_SOURCE = "threads_graph_api"
 THREADS_HOSTS = frozenset({"threads.com", "www.threads.com", "threads.net", "www.threads.net"})
 
@@ -328,16 +329,31 @@ def _link_preview_roots(root: _Node) -> set[int]:
     return previews
 
 
-def _is_external_link_label(node: _Node, region: _Node) -> bool:
-    """Threads marks external link labels translate=no as well as usernames."""
+def _is_inline_link_label(node: _Node, region: _Node) -> bool:
+    """External links and inline profile mentions are not reply metadata."""
     for ancestor in node.ancestors():
         if ancestor is region:
             break
         if ancestor.tag == "a":
             href = ancestor.attrs.get("href", "")
             host, _parts = _absolute_path(href)
-            return bool(href and host not in THREADS_HOSTS)
+            return bool(href and (host not in THREADS_HOSTS or _profile_username(ancestor)))
     return False
+
+
+def _is_reply_context_region(region: _Node) -> bool:
+    """Recognize the complete, localized metadata line, not a body prefix."""
+    markers = [node for node in region.descendants() if node.attrs.get("translate", "").casefold() == "no"]
+    if len(markers) != 1 or _is_inline_link_label(markers[0], region):
+        return False
+    username = _render_text(markers[0], set()).strip()
+    if not re.fullmatch(r"@[\w.]+", username):
+        return False
+    text = " ".join(_render_text(region, set()).split())
+    return text.casefold() in {
+        f"replying to {username}".casefold(),
+        f"в ответ {username}".casefold(),
+    }
 
 
 def _media_ready(node: _Node) -> bool:
@@ -464,10 +480,15 @@ def parse_post_card_html(
         and not _hidden(node)
         and not _inside_exclusions(node, excluded_roots)
     ]
+    # The search DOM renders reply metadata before the own-body region, with
+    # its recipient in a separate translate=no span. Exclude only a complete
+    # recognized leading metadata line; unknown layouts still fail closed.
+    if body_regions and _is_reply_context_region(body_regions[0]):
+        body_regions = body_regions[1:]
     if len(body_regions) > 1 and any(
         any(
             descendant.attrs.get("translate", "").casefold() == "no"
-            and not _is_external_link_label(descendant, region)
+            and not _is_inline_link_label(descendant, region)
             for descendant in region.descendants()
         )
         for region in body_regions

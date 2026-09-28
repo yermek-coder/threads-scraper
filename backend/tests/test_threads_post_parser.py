@@ -91,9 +91,19 @@ class ThreadsPostParserTests(unittest.TestCase):
         self.assertEqual((result.status, result.text), (ExtractionStatus.SUCCESS, "Свой текст ✨"))
         self.assertNotIn("Вложенный текст", result.text or "")
 
-    def test_reply_context_is_not_combined_with_own_text_when_structure_is_ambiguous(self) -> None:
+    def test_recognized_reply_context_is_excluded_from_own_text(self) -> None:
         result = parse_post_card_html(
             load_html("reply_context.html"),
+            expected_post_id="ReplyPost1",
+            expected_username="reply_user",
+            permalink="https://www.threads.com/@reply_user/post/ReplyPost1",
+        )
+        self.assertEqual(result.status, ExtractionStatus.SUCCESS)
+        self.assertEqual(result.text, "Own reply text")
+
+    def test_unrecognized_reply_context_remains_ambiguous(self) -> None:
+        result = parse_post_card_html(
+            load_html("reply_context.html").replace("Replying to", "Unrecognized context"),
             expected_post_id="ReplyPost1",
             expected_username="reply_user",
             permalink="https://www.threads.com/@reply_user/post/ReplyPost1",
@@ -259,7 +269,7 @@ class ThreadsPostParserTests(unittest.TestCase):
             "extraction": {
                 "post_id": "Target1",
                 "source": "threads_post_dom",
-                "parser_version": "threads-post-dom-v3",
+                "parser_version": "threads-post-dom-v4",
                 "status": "success",
                 "reason": "body_verified",
             }

@@ -17,3 +17,11 @@ labels inside external anchors while keeping ambiguous reply context rejected.
 The regression runs the search capture script with both English and Russian
 browser locales and column labels. Raw HTML and session credentials are not
 stored in the repository.
+
+Follow-up search capture found reply `DTX3-MpiNvC` with a separate metadata
+region `В ответ @recipient` before its own text `Какой город?`. External-link
+handling alone did not fix this case. The parser recognizes complete leading
+`В ответ` / `Replying to` regions with a single untranslated recipient and
+excludes them from the body. Unknown metadata remains unconfirmed; inline
+profile links remain body content. Browser regressions cover metadata with
+multiple body regions, metadata without a body, and inline mentions.
