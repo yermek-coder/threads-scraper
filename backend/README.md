@@ -69,8 +69,15 @@ verified preceding post bodies in `raw_data.conversation_context`. It links only
 cards inside the same `threads_search_results_*` pagelet, excluding nested quotes
 and neighboring results. This is displayed conversation context, not a guarantee
 that the first card is the original thread root. Truncated or unconfirmed ancestor
-bodies are not supplied to Jev. Jev evaluates the reply itself with this context,
-using the configured prompt plus reply-specific guidance. A newly discovered or
+bodies are not supplied to Jev. Jev evaluates the reply together with all available
+preceding bodies when instructed by the editable prompt. The request uses exactly
+the prompt shown in Settings plus technical guidance to read conversation context.
+Geographic rules are editable in the prompt and are never appended to requests. Replies
+on topic need not repeat the keyword or geography. Geographic rejection requires
+an explicit location outside East Kazakhstan Region, Kazakhstan; missing location
+alone does not cause rejection. At startup, a one-time migration appends these visible rules to existing custom
+prompts; subsequent admin edits are preserved.
+A newly discovered or
 changed context rechecks an existing reply without sending another notification.
 The feed displays these preceding posts above the reply in one conversation card,
 with separate authors and source links. Review and selection actions apply to the

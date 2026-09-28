@@ -15,6 +15,7 @@ from app.core.database import Base, SessionFactory, engine
 from app.core.security import hash_password
 from app.models import User
 from app.services.scheduler import start_scheduler, stop_scheduler
+from app.services.settings_service import migrate_jev_visible_prompt
 from app.services.threads_web_client import close_threads_web_browser
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -67,6 +68,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if len(secret_key) < 32:
         raise RuntimeError("SECRET_KEY must contain at least 32 characters")
     await _initialize_database()
+    async with SessionFactory() as db:
+        await migrate_jev_visible_prompt(db)
     start_scheduler()
     try:
         yield

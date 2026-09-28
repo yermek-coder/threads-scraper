@@ -136,7 +136,7 @@ class SettingsUpdate(BaseModel):
     threads_collection_method: Literal["web", "api"] | None = None
     openrouter_api_key: str | None = Field(default=None, max_length=4096)
     jev_relevance_enabled: bool | None = None
-    jev_relevance_prompt: str | None = Field(default=None, min_length=1, max_length=4000)
+    jev_relevance_prompt: str | None = Field(default=None, min_length=1, max_length=8000)
     smtp_host: str | None = Field(default=None, max_length=255)
     smtp_port: int | None = Field(default=None, ge=1, le=65535)
     smtp_user: str | None = Field(default=None, max_length=320)

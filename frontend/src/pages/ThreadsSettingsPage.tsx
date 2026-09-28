@@ -257,11 +257,11 @@ export default function ThreadsSettingsPage({ notify, section }: Props) {
                 <textarea
                   className="mt-2 min-h-36 w-full rounded-xl border border-[#dfe4e6] bg-white px-3 py-3 text-sm font-normal leading-6 text-ink focus:border-[#9abd61] focus:outline-none"
                   value={jevPrompt}
-                  maxLength={4000}
+                  maxLength={8000}
                   required
                   onChange={(event) => setJevPrompt(event.target.value)}
                 />
-                <span className="mt-1 block text-xs font-normal text-muted">Вопрос будет задан о state.post и state.keyword. Можно описать, какие упоминания считать релевантными.</span>
+                <span className="mt-1 block text-xs font-normal text-muted">Правила релевантности и географии задаются здесь. Для ответов Jev также получает служебную инструкцию учитывать контекст обсуждения. state.post — публикация, state.keyword — ключевая фраза, state.conversation_context — предыдущие посты обсуждения, если они есть.</span>
               </label>
             </div>
             <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#edf0f1] pt-4">

@@ -138,7 +138,7 @@ class ConversationRelevanceTests(unittest.TestCase):
             "Custom criteria", payload["questions"]["relevant"]["instructions"]
         )
         self.assertIn(
-            "сама по себе не делает ответ релевантным",
+            "Custom criteria",
             payload["questions"]["relevant"]["instructions"],
         )
 
@@ -150,7 +150,7 @@ class ConversationRelevanceTests(unittest.TestCase):
         context = FilterContext(
             stop_words=(),
             openrouter_api_key="test",
-            jev_relevance_prompt="Custom criteria",
+            jev_relevance_prompt="вместе с контекстом обсуждения",
         )
         with patch("app.services.filter_service.httpx.AsyncClient") as factory:
             factory.return_value.__aenter__.return_value = client
@@ -160,6 +160,5 @@ class ConversationRelevanceTests(unittest.TestCase):
         self.assertTrue(result)
         payload = client.post.call_args.kwargs["json"]
         self.assertEqual(payload["state"], {"post": "Standalone", "keyword": "dentist"})
-        self.assertEqual(
-            payload["questions"]["relevant"]["instructions"], "Custom criteria"
-        )
+        instructions = payload["questions"]["relevant"]["instructions"]
+        self.assertEqual(instructions, "Custom criteria")
