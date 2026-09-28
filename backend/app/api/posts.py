@@ -3,7 +3,7 @@
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import BigInteger, String, and_, case, cast, func, or_, select
+from sqlalchemy import BigInteger, String, and_, case, cast, delete, func, or_, select
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.functions import FunctionElement
@@ -188,6 +188,13 @@ async def update_post_status(post_id: int, payload: PostStatusUpdate, db: DbDep)
     await db.refresh(post)
     phrase = await db.scalar(select(Keyword.phrase).where(Keyword.id == post.matched_keyword_id))
     return _post_read(post, phrase)
+
+
+@router.delete("", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_all_posts(db: DbDep) -> None:
+    """Delete every collected post, regardless of feed filters."""
+    await db.execute(delete(Post))
+    await db.commit()
 
 
 @router.delete("/{post_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -187,7 +187,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
   const [collecting, setCollecting] = useState(false);
   const [busyPostIds, setBusyPostIds] = useState<number[]>([]);
   const [selectedPostIds, setSelectedPostIds] = useState<number[]>([]);
-  const [bulkAction, setBulkAction] = useState<'status' | 'delete' | null>(null);
+  const [bulkAction, setBulkAction] = useState<'status' | 'delete' | 'clear' | null>(null);
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
   const [loadError, setLoadError] = useState('');
 
@@ -288,6 +288,24 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
     }
   }
 
+  async function clearAllPosts() {
+    if (bulkAction !== null || busyPostIds.length > 0 || collecting) return;
+    if (!window.confirm('Удалить ВСЕ посты из базы, включая скрытые фильтрами и дубликаты? Это действие нельзя отменить.')) return;
+    setBulkAction('clear');
+    try {
+      await api<void>('/posts', { method: 'DELETE' });
+      setSelectedPostIds([]);
+      setData((current) => current ? { ...current, items: [], total: 0, page: 1 } : current);
+      setPage(1);
+      setFeedRefreshKey((current) => current + 1);
+      notify({ kind: 'success', message: 'Все посты удалены из базы.' });
+    } catch (error) {
+      notify({ kind: 'error', message: userMessage(error) });
+    } finally {
+      setBulkAction(null);
+    }
+  }
+
   async function updateSelectedPosts(patch: { is_read?: boolean; is_relevant?: boolean }, actionLabel: string) {
     const ids = [...selectedPostIds];
     if (!ids.length || busyPostIds.length > 0) return;
@@ -384,9 +402,14 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
     <div className="animate-enter">
       <PageHeading
         title="Лента упоминаний"
-        action={<Button onClick={() => void collectNow()} disabled={collecting || activeKeywords === 0} className="min-h-11 bg-[#c5f36a] text-ink hover:bg-[#b5e45c] disabled:bg-[#e3e8df]">
+        action={<div className="flex flex-wrap items-center gap-2">
+          <Button variant="danger" onClick={() => void clearAllPosts()} disabled={feedBusy || collecting || loading}>
+            <Trash2 className="h-4 w-4" aria-hidden="true" />{bulkAction === 'clear' ? 'Очищаем…' : 'Очистить все посты'}
+          </Button>
+          <Button onClick={() => void collectNow()} disabled={collecting || feedBusy || activeKeywords === 0} className="min-h-11 bg-[#c5f36a] text-ink hover:bg-[#b5e45c] disabled:bg-[#e3e8df]">
           <RefreshCw className={`h-4 w-4 ${collecting ? 'animate-spin' : ''}`} />{collecting ? 'Собираем…' : 'Запустить сбор'}
-        </Button>}
+          </Button>
+        </div>}
       />
 
       <section className="mb-5 grid gap-3 sm:grid-cols-3" aria-label="Сводка ленты">
@@ -434,7 +457,7 @@ export default function FeedPage({ notify, onGoToKeywords }: Props) {
           icon={activeKeywords ? ArrowDownWideNarrow : Sparkles}
           title={activeKeywords ? 'По этим условиям ничего не найдено' : 'Добавьте первую ключевую фразу'}
           description={activeKeywords ? 'Попробуйте изменить фильтры или запустите сбор, чтобы проверить свежие публикации.' : 'Добавьте название бренда или другую поисковую фразу, а затем запустите первый сбор.'}
-          action={activeKeywords ? <Button variant="secondary" onClick={() => void collectNow()} disabled={collecting}><RefreshCw className={`h-4 w-4 ${collecting ? 'animate-spin' : ''}`} />Запустить сбор</Button> : <Button onClick={onGoToKeywords}>Настроить фразы</Button>}
+          action={activeKeywords ? <Button variant="secondary" onClick={() => void collectNow()} disabled={collecting || feedBusy}><RefreshCw className={`h-4 w-4 ${collecting ? 'animate-spin' : ''}`} />Запустить сбор</Button> : <Button onClick={onGoToKeywords}>Настроить фразы</Button>}
         />
       )}
       {!loading && !loadError && Boolean(data?.items.length) && (
