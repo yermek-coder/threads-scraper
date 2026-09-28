@@ -78,7 +78,7 @@ function ConversationContext({ posts }: { posts: ConversationPost[] }) {
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#eef2ed] text-sm font-bold text-[#51635a]" aria-hidden="true">
               {parent.username.slice(0, 1).toUpperCase()}
             </div>
-            <span className="absolute -bottom-5 top-12 w-px bg-[#d8dfe1]" aria-hidden="true" />
+            <span className="absolute -bottom-3 top-12 w-px bg-[#d8dfe1]" aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">
             <a href={parent.permalink} target="_blank" rel="noreferrer" className="inline-flex min-h-10 max-w-full items-center gap-2 font-semibold text-ink underline-offset-4 hover:underline" aria-label={`Открыть пост @${parent.username} в Threads`}>
