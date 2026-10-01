@@ -36,6 +36,7 @@ class AppConfig(BaseSettings):
     threads_user_id: str = ""
     threads_verify_token: SecretStr = Field(default=SecretStr(""))
     threads_api_base_url: str = "https://graph.threads.net"
+    threads_collection_enabled: bool = True
     threads_poll_interval_minutes: int = Field(default=10, ge=1, le=1440)
     threads_daily_call_limit: int = Field(default=2200, ge=1)
     threads_token_refresh_interval_days: int = Field(default=7, ge=1, le=60)

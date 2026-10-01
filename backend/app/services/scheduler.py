@@ -44,24 +44,27 @@ def start_scheduler() -> None:
     """Start scheduled jobs if the scheduler is not already running."""
     if scheduler.running:
         return
-    scheduler.add_job(
-        poll_active_keywords,
-        trigger=IntervalTrigger(minutes=config.threads_poll_interval_minutes),
-        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=15),
-        id="threads-keyword-poll",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
-    scheduler.add_job(
-        poll_active_keywords,
-        trigger=IntervalTrigger(hours=6),
-        kwargs={"search_sections": ("top",)},
-        id="threads-top-poll",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
+    if config.threads_collection_enabled:
+        scheduler.add_job(
+            poll_active_keywords,
+            trigger=IntervalTrigger(minutes=config.threads_poll_interval_minutes),
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=15),
+            id="threads-keyword-poll",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            poll_active_keywords,
+            trigger=IntervalTrigger(hours=6),
+            kwargs={"search_sections": ("top",)},
+            id="threads-top-poll",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+    else:
+        logger.info("Scheduled Threads collection is disabled by configuration")
     scheduler.add_job(
         refresh_token_if_due,
         trigger=IntervalTrigger(hours=6),
