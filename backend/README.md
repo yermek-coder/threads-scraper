@@ -89,11 +89,11 @@ Collection and relevance events are written to the backend container log as one-
 Follow production backend logs from the repository directory with:
 
 ```sh
-docker compose -p threads-scraper -f docker-compose.yml -f deploy/oracle/docker-compose.yml logs -f backend
+docker compose logs -f backend
 ```
 
 Filter to collection and relevance diagnostics with:
 
 ```sh
-docker compose -p threads-scraper -f docker-compose.yml -f deploy/oracle/docker-compose.yml logs -f backend 2>&1 | grep -E 'threads\.collection_|threads\.discovery_|threads\.extraction_|jev\.|relevance\.'
+docker compose logs -f backend 2>&1 | grep -E 'threads\.collection_|threads\.discovery_|threads\.extraction_|jev\.|relevance\.'
 ```
